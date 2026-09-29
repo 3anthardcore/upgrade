@@ -1,7 +1,13 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import {
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  existsSync,
+  realpathSync,
+} from "node:fs";
 import { resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import { Store, projectRoot, UpgradeError } from "../core/index.ts";
 import { Pipeline } from "../core/pipeline.ts";
 import { doctor } from "../core/doctor.ts";
@@ -322,10 +328,19 @@ export async function main(argv = process.argv.slice(2)) {
     store.close();
   }
 }
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(resolve(process.argv[1])).href
-) {
+function isMainModule() {
+  if (!process.argv[1]) return false;
+  try {
+    // Node resolves module URLs through symlinks; argv preserves the invoked path.
+    return (
+      realpathSync(process.argv[1]) ===
+      realpathSync(fileURLToPath(import.meta.url))
+    );
+  } catch {
+    return false;
+  }
+}
+if (isMainModule()) {
   main()
     .then((code) => (process.exitCode = code))
     .catch((error) => {

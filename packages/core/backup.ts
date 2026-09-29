@@ -10,6 +10,64 @@ import {
 } from "node:fs/promises";
 import { resolve, relative, sep, dirname } from "node:path";
 import { Store, hash, UpgradeError, inside } from "./index.ts";
+import type { Run, Task } from "../contracts/index.ts";
+
+/** Process leases belong to the source instance, not to an independently restored copy. */
+function detachRestoredOwnership(store: Store) {
+  return store.transaction(() => {
+    const runs = new Map(store.list<Run>("run").map((run) => [run.run_id, run]));
+    const running = store.list<Task>("task").filter((task) => task.status === "RUNNING");
+    const detachedRuns: string[] = [];
+    const unknownTasks: string[] = [];
+    for (const task of running) {
+      const run = runs.get(task.run_id);
+      if (!run || run.budget.reserved < task.budget.reserved_units)
+        throw new UpgradeError("Restored task reservation is inconsistent", 5);
+      const previous = {
+        lease_owner: task.lease_owner,
+        lease_until: task.lease_until,
+        fencing_token: task.fencing_token,
+      };
+      // The attempt may still be running on the source host. Do not silently retry,
+      // refund its reservation, reset attempt/deadline, or accept its old token here.
+      run.budget.reserved -= task.budget.reserved_units;
+      run.budget.unknown += task.budget.reserved_units;
+      task.status = "BLOCKED";
+      task.fencing_token++;
+      task.lease_owner = null;
+      task.lease_until = null;
+      task.updated_at = new Date().toISOString();
+      if (run.execution_status === "ACTIVE") run.execution_status = "BLOCKED";
+      store.put("task", task.task_id, task);
+      store.event(
+        "task.restore_reconciliation_required",
+        "restore",
+        { reason: "SOURCE_WORKER_OUTCOME_UNKNOWN", previous, reserved_units_to_unknown: task.budget.reserved_units },
+        task.run_id,
+        task.task_id,
+      );
+      unknownTasks.push(task.task_id);
+    }
+    for (const run of runs.values()) {
+      if (run.dispatcher_owner !== null || run.dispatcher_until !== 0) {
+        const previous = { owner: run.dispatcher_owner, until: run.dispatcher_until };
+        run.dispatcher_owner = null;
+        run.dispatcher_until = 0;
+        detachedRuns.push(run.run_id);
+        store.event("dispatcher.restore_detached", "restore", { previous }, run.run_id);
+      }
+      store.put("run", run.run_id, run);
+    }
+    store.event("restore.completed", "restore", {
+      kind: "upgrade-state-only",
+      detached_run_ids: detachedRuns,
+      reconciliation_required_task_ids: unknownTasks,
+      bitrix_restore: "NOT_RUN",
+    });
+    return { detached_run_ids: detachedRuns, reconciliation_required_task_ids: unknownTasks };
+  });
+}
+
 export async function backupProject(store: Store, destination: string) {
   const root = resolve(destination);
   if (root === store.root || root.startsWith(store.root + sep))
@@ -107,12 +165,15 @@ export async function restoreProject(source: string, destination: string) {
   const store = new Store(target);
   try {
     store.validateArtifacts();
+    const recovery = detachRestoredOwnership(store);
+    store.exportEvents();
     const status = store.getStatus();
     return {
       status: "RESTORED",
       kind: "upgrade-state-only",
       project_id: status.project.project_id,
       artifacts: status.artifacts.length,
+      recovery,
       bitrix_restore: "NOT_RUN",
     };
   } finally {

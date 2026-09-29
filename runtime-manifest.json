@@ -11,13 +11,15 @@
   "sqlite": "Node.js built-in node:sqlite; inspect doctor on target",
   "js_dependencies": "package-lock.json",
   "tested_platform": "Windows x64",
-  "linux_deployment": "NOT_RUN",
+  "linux_deployment": "r2 baseline installed; Chromium PASS; r3 source/offline/restore QA pending",
+  "server_codex_auth": "NOT_AUTHENTICATED",
   "bitrix": "NOT_RUN",
   "mysql_target": "NOT_RUN",
   "docker_target": "NOT_RUN",
   "notes": [
     "PHP package validator and template tests do not verify a real Bitrix installation.",
     "Target images require verified digests; no latest image is assumed.",
-    "Server disk expansion permission is pending; existing services unchanged."
+    "Server disk expanded to 157G ext4; existing Node and services preserved.",
+    "Private Linux Node 24.20.0 and Codex CLI 0.154.0 installed; real Bitrix remains NOT_RUN."
   ]
 }

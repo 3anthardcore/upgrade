@@ -64,11 +64,10 @@ root_directory() {
 }
 CONTROL="$BASE/deployment-control"
 root_directory "$CONTROL"
-LOG_DIRECTORY=
+root_directory "$BASE/deploy-logs"
+LOG_DIRECTORY=$(mktemp -d "$BASE/deploy-logs/${RELEASE:-rollback-$ROLLBACK}.XXXXXXXX")
+printf 'Installer diagnostics (root only): %s\n' "$LOG_DIRECTORY"
 if [[ -z "$ROLLBACK" ]]; then
-  root_directory "$BASE/deploy-logs"
-  LOG_DIRECTORY=$(mktemp -d "$BASE/deploy-logs/$RELEASE.XXXXXXXX")
-  printf 'Installer diagnostics (root only): %s\n' "$LOG_DIRECTORY"
   # Snapshot once into root-only storage; a caller-writable archive can change later.
   timeout 60 head -c 209715201 -- "$ARCHIVE" > "$LOG_DIRECTORY/source.tar.gz"
   [[ $(stat -c %s -- "$LOG_DIRECTORY/source.tar.gz") -le 209715200 ]] || die 'Archive snapshot exceeds 200 MiB limit'
@@ -82,7 +81,17 @@ switch_to() { local target=$1 link="$BASE/.current-link-$$"; [[ ! -e "$link" && 
 on_exit() { local code=$?; if ((code != 0 && SWITCHED)); then if [[ -n "$PREVIOUS" ]]; then switch_to "$PREVIOUS"; else [[ -L "$BASE/current" ]] && rm -- "$BASE/current"; fi; printf 'Activation failed; previous current selection restored. No shared data was reverted.\n' >&2; fi; }
 trap on_exit EXIT
 RUNTIME="$BASE/runtime/$NODE_NAME"
-run_app() { runuser -u upgrade -- env -i HOME="$BASE/shared/home" CODEX_HOME="$BASE/shared/codex" PATH="$RUNTIME/bin:/usr/bin:/bin" UPGRADE_DATA_DIR="$BASE/shared/projects" PLAYWRIGHT_BROWSERS_PATH="$BASE/shared/browser-cache" NPM_CONFIG_CACHE="$BASE/shared/cache" "$@"; }
+run_app() { runuser -u upgrade -- env -i HOME="$BASE/shared/home" CODEX_HOME="$BASE/shared/codex" PATH="$RUNTIME/bin:$BASE/bin:/usr/bin:/bin" UPGRADE_DATA_DIR="$BASE/shared/projects" PLAYWRIGHT_BROWSERS_PATH="$BASE/shared/browser-cache" NPM_CONFIG_CACHE="$BASE/shared/cache" "$@"; }
+verify_help() {
+  "$RUNTIME/bin/node" --input-type=commonjs - "$1" "$2/package.json" <<'HELP_CHECK'
+const fs=require('node:fs');const [file,packageFile]=process.argv.slice(2);
+if(fs.statSync(file).size===0||fs.statSync(file).size>65536)throw Error('CLI help is empty or oversized');
+const help=JSON.parse(fs.readFileSync(file,'utf8')),pkg=JSON.parse(fs.readFileSync(packageFile,'utf8'));
+if(help.tool!=='Upgrade'||typeof help.version!=='string'||help.version!==pkg.version||!Array.isArray(help.commands)||!help.commands.every(x=>typeof x==='string'))throw Error('Invalid CLI help identity/version/commands');
+const commands=new Set(help.commands.map(x=>x.split(/\s+/)[0]));
+if(!['doctor','init','run','status'].every(x=>commands.has(x)))throw Error('CLI help misses required commands');
+HELP_CHECK
+}
 verify_source() {
   local pin="$CONTROL/$2.manifest.sha256"
   [[ -f "$pin" && ! -L "$pin" && $(stat -c %u -- "$pin") == 0 && $(stat -c %h -- "$pin") == 1 ]] || die 'Root-owned accepted manifest pin is missing or unsafe'
@@ -100,8 +109,11 @@ if [[ -n "$ROLLBACK" ]]; then
   target="$BASE/releases/$ROLLBACK"
   [[ -d "$target" && ! -L "$target" && -f "$target/deployment.json" && -x "$RUNTIME/bin/node" ]] || die 'Rollback release/runtime unavailable'
   verify_source "$target" "$ROLLBACK"
-  run_app "$RUNTIME/bin/node" --disable-warning=ExperimentalWarning "$target/packages/cli/index.ts" help >/dev/null
+  run_app timeout 30 "$RUNTIME/bin/node" --disable-warning=ExperimentalWarning "$target/packages/cli/index.ts" help > "$LOG_DIRECTORY/help.json"
+  verify_help "$LOG_DIRECTORY/help.json" "$target"
   switch_to "$target"
+  runuser -u upgrade -- timeout 30 "$BASE/bin/upgrade" help > "$LOG_DIRECTORY/help-active.json"
+  verify_help "$LOG_DIRECTORY/help-active.json" "$target"
   printf 'Selected rollback release %s. Shared projects, budgets and data were not rolled back.\n' "$ROLLBACK"
   exit 0
 fi
@@ -163,6 +175,7 @@ import {pathToFileURL} from 'node:url';import {resolve} from 'node:path';const {
 NODE
 fi
 run_app timeout 30 "$RUNTIME/bin/node" --disable-warning=ExperimentalWarning "$target/packages/cli/index.ts" help > "$LOG_DIRECTORY/help.json"
+verify_help "$LOG_DIRECTORY/help.json" "$target"
 run_app timeout 60 "$RUNTIME/bin/node" --disable-warning=ExperimentalWarning "$target/packages/cli/index.ts" doctor > "$LOG_DIRECTORY/doctor.json"
 "$RUNTIME/bin/node" --input-type=commonjs - "$target" "$EXPECTED_SHA" "$NODE_SHA256" "$INSTALL_BROWSER" "$LOG_DIRECTORY" <<'NODE'
 const fs=require('node:fs'),cp=require('node:child_process');const [root,archive,node,browser,logs]=process.argv.slice(2);
@@ -174,10 +187,11 @@ cat > "$BASE/bin/upgrade" <<'SH'
 set -euo pipefail
 [[ $(id -un) == upgrade ]] || { echo 'Run this CLI as OS user upgrade (for example: sudo -u upgrade /opt/upgrade/bin/upgrade help)' >&2; exit 1; }
 cd /opt/upgrade/current
-exec env -i HOME=/opt/upgrade/shared/home CODEX_HOME=/opt/upgrade/shared/codex PATH=/opt/upgrade/runtime/node-v24.20.0-linux-x64/bin:/usr/bin:/bin UPGRADE_DATA_DIR=/opt/upgrade/shared/projects PLAYWRIGHT_BROWSERS_PATH=/opt/upgrade/shared/browser-cache NPM_CONFIG_CACHE=/opt/upgrade/shared/cache /opt/upgrade/runtime/node-v24.20.0-linux-x64/bin/node --disable-warning=ExperimentalWarning /opt/upgrade/current/packages/cli/index.ts "$@"
+exec env -i HOME=/opt/upgrade/shared/home CODEX_HOME=/opt/upgrade/shared/codex PATH=/opt/upgrade/runtime/node-v24.20.0-linux-x64/bin:/opt/upgrade/bin:/usr/bin:/bin UPGRADE_DATA_DIR=/opt/upgrade/shared/projects PLAYWRIGHT_BROWSERS_PATH=/opt/upgrade/shared/browser-cache NPM_CONFIG_CACHE=/opt/upgrade/shared/cache /opt/upgrade/runtime/node-v24.20.0-linux-x64/bin/node --disable-warning=ExperimentalWarning /opt/upgrade/current/packages/cli/index.ts "$@"
 SH
 chown root:upgrade "$BASE/bin/upgrade"; chmod 0750 "$BASE/bin/upgrade"
 switch_to "$target"
-runuser -u upgrade -- "$BASE/bin/upgrade" help >/dev/null
+runuser -u upgrade -- timeout 30 "$BASE/bin/upgrade" help > "$LOG_DIRECTORY/help-active.json"
+verify_help "$LOG_DIRECTORY/help-active.json" "$target"
 printf 'Upgrade CLI release %s active. Receipt: %s/deployment.json\n' "$RELEASE" "$target"
 printf 'No public listener started. Bitrix and server Codex execution remain separately verified.\n'
