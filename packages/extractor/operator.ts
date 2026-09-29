@@ -93,6 +93,22 @@ const record = (value: unknown): Record<string, unknown> =>
 const escapeText = (value: string) =>
   value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const mediaExtension = /\.(?:png|jpe?g|gif|webp|avif|svg|pdf)(?:[?#]|$)/i;
+const selectedFieldLabels = new Map([
+  ["title", "Название"],
+  ["availability", "Наличие на странице источника"],
+  ["promotion", "Акция на странице источника"],
+  ["description_excerpt", "Фрагмент описания"],
+]);
+function selectedFieldLabel(name: string): string {
+  const known = selectedFieldLabels.get(name);
+  if (known) return known;
+  // Presentation only: canonical zero-based index, bounded by the 5000-field
+  // observation contract. No price role (old/current/discount) is inferred.
+  const price = /^displayed_price_(0|[1-9][0-9]{0,3})$/.exec(name);
+  if (price && Number(price[1]) < 5000)
+    return `Цена на странице источника (${Number(price[1]) + 1})`;
+  return name;
+}
 
 function safeRelativePath(value: string) {
   if (
@@ -585,7 +601,10 @@ export async function extractOperatorContent(
       if (selected.fields.length)
         entity.blocks.push({
           type: "table",
-          rows: selected.fields.map((field) => [field.name, field.text]),
+          rows: selected.fields.map((field) => [
+            selectedFieldLabel(field.name),
+            field.text,
+          ]),
         });
       selected.fields.forEach((field, index) => {
         const locator = `selected.fields[${index}] (${field.locator})`;

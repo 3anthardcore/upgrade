@@ -5,6 +5,7 @@ import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { load } from "cheerio";
+import { spawnSync } from "node:child_process";
 import { validateOperatorCapture } from "../../packages/crawler/operator.ts";
 import type {
   OperatorCaptureManifest,
@@ -145,7 +146,13 @@ async function fixture(customDom = dom, customSelected = selected) {
     read,
     changeAcceptedObservation,
     async close() {
-      await rm(directory, { recursive: true, force: true });
+      const target = path.resolve(directory);
+      assert.equal(path.dirname(target), path.resolve(os.tmpdir()));
+      assert.match(
+        path.basename(target),
+        /^upgrade-operator-extract-[A-Za-z0-9_-]+$/,
+      );
+      await rm(target, { recursive: true, force: true });
     },
   };
 }
@@ -188,7 +195,15 @@ test("partial operator extraction preserves the exact selected prices, stock tex
     );
     assert.deepEqual(
       entity.blocks.find((block) => block.type === "table")?.rows,
-      selected.fields.map((field) => [field.name, field.text]),
+      [
+        "Название",
+        "Цена на странице источника (1)",
+        "Цена на странице источника (2)",
+        "Наличие на странице источника",
+        "Габариты",
+        "type",
+        "unsafe text",
+      ].map((label, index) => [label, selected.fields[index].text]),
     );
     for (const item of model.raw_selected_fields) {
       assert.equal(
@@ -237,6 +252,159 @@ test("partial operator extraction preserves the exact selected prices, stock tex
     await f.close();
   }
 });
+
+test("localized table labels preserve original field identities, exact values and unknown price semantics", async () => {
+  const names = [
+    "title",
+    "availability",
+    "displayed_price_0",
+    "displayed_price_1",
+    "promotion",
+    "description_excerpt",
+    "displayed_price_4999",
+    "displayed_price_5000",
+    "displayed_price_01",
+    "displayed_price_-1",
+    "displayed_price_9007199254740992",
+    "__proto__",
+    "constructor",
+    "<img src=x onerror=alert(1)>",
+  ];
+  const labels = [
+    "Название",
+    "Наличие на странице источника",
+    "Цена на странице источника (1)",
+    "Цена на странице источника (2)",
+    "Акция на странице источника",
+    "Фрагмент описания",
+    "Цена на странице источника (5000)",
+    ...names.slice(7),
+  ];
+  const observation = {
+    ...selected,
+    fields: names.map((name, index) => ({
+      name,
+      locator: `observed:${index}`,
+      text: `  ${index === 2 ? "3350 р." : index === 3 ? "2178 р." : "Источник <script>не исполнять</script>"}\n`,
+    })),
+    asset_urls: [],
+  };
+  const f = await fixture(dom, observation);
+  try {
+    const before = JSON.stringify(f.capture);
+    const model = await extractOperatorContent(f.capture, { readFile: f.read });
+    const entity = model.entities.find(
+      (item) => item.source_url === selectedUrl,
+    )!;
+    assert.deepEqual(
+      entity.blocks.find((block) => block.type === "table")?.rows,
+      labels.map((label, index) => [label, observation.fields[index].text]),
+    );
+    assert.deepEqual(
+      model.raw_selected_fields.map(({ name, locator, text }) => ({
+        name,
+        locator,
+        text,
+      })),
+      observation.fields,
+    );
+    for (const [index, field] of observation.fields.entries()) {
+      const fact = entity.facts[`operator_field:${index}`];
+      assert.equal(fact.value, field.text);
+      assert.equal(
+        fact.evidence.snapshot_sha256,
+        f.capture.observations[1].file.sha256,
+      );
+      assert.match(
+        fact.evidence.locator,
+        new RegExp(`selected\\.fields\\[${index}\\]`),
+      );
+    }
+    assert.equal(entity.facts.price.status, "UNKNOWN");
+    assert.equal(entity.facts.availability.status, "UNKNOWN");
+    assert.deepEqual(model.prices, []);
+    assert.deepEqual(model.offers, []);
+    assert.equal(model.source_capture.full_source_denominator, "UNKNOWN");
+    assert.equal(
+      model.source_capture.server_access_block_id,
+      "access-must-remain-active",
+    );
+    assert.deepEqual(model.source_inventory, f.capture.inventory);
+    assert.equal(JSON.stringify(f.capture), before);
+  } finally {
+    await f.close();
+  }
+});
+
+test(
+  "own PHP table formatter escapes unchanged unknown labels and verbatim source values",
+  { skip: !process.env.UPGRADE_PHP_BIN },
+  async () => {
+    const unknown = '<img src=x onerror="alert(1)"> & source label';
+    const value = '<script>throw new Error("source")</script> 2178 р.';
+    const observation = {
+      ...selected,
+      fields: [
+        {
+          name: "displayed_price_1",
+          locator: "visible price",
+          text: "2178 р.",
+        },
+        { name: unknown, locator: "source label", text: value },
+      ],
+      asset_urls: [],
+    };
+    const f = await fixture(dom, observation);
+    try {
+      const model = await extractOperatorContent(f.capture, {
+        readFile: f.read,
+      });
+      const entity = model.entities.find(
+        (item) => item.source_url === selectedUrl,
+      )!;
+      // Invoke only the existing pure fields formatter: no constructor, CMS bootstrap,
+      // Store, target connection or write. Untrusted entity arrives as JSON on stdin.
+      const code =
+        'require $argv[1]; $class=new ReflectionClass("Upgrade\\Core\\Gateway"); $object=$class->newInstanceWithoutConstructor(); $method=$class->getMethod("fields"); $entity=json_decode(stream_get_contents(STDIN),true,512,JSON_THROW_ON_ERROR); echo json_encode($method->invoke($object,$entity),JSON_UNESCAPED_UNICODE|JSON_THROW_ON_ERROR);';
+      const result = spawnSync(
+        process.env.UPGRADE_PHP_BIN!,
+        [
+          "-n",
+          "-r",
+          code,
+          path.resolve("bitrix/module/upgrade.core/lib/gateway.php"),
+        ],
+        {
+          input: JSON.stringify(entity),
+          encoding: "utf8",
+          timeout: 10000,
+          maxBuffer: 1_000_000,
+          shell: false,
+          windowsHide: true,
+        },
+      );
+      assert.equal(result.status, 0, result.stderr);
+      const rendered = JSON.parse(result.stdout).DETAIL_TEXT;
+      assert.doesNotMatch(rendered, /<script|<img/i);
+      const html = load(rendered);
+      const rows = html("tr")
+        .toArray()
+        .map((row) =>
+          html(row)
+            .find("td")
+            .toArray()
+            .map((cell) => html(cell).text()),
+        );
+      assert.deepEqual(rows, [
+        ["Цена на странице источника (2)", "2178 р."],
+        [unknown, value],
+      ]);
+      assert.equal(model.raw_selected_fields[1].name, unknown);
+    } finally {
+      await f.close();
+    }
+  },
+);
 
 test("DOM extraction sanitizes active content, preserves typed visible content and only observes controls", async () => {
   const f = await fixture();
