@@ -221,6 +221,7 @@ export async function safeFetch(
             "retry-after",
             "x-robots-tag",
             "content-language",
+            "cf-mitigated",
           ]) {
             const value = response.headers[name];
             if (value !== undefined)

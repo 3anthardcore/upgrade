@@ -5,6 +5,7 @@ export interface RenderOptions {
   request: (url: string) => Promise<HttpResponse>;
   executablePath?: string;
   timeoutMs?: number;
+  checkDom?: (html: string) => Promise<void>;
 }
 
 /** Browser HTTP transport is entirely fulfilled by the DNS-pinned GET-only loader. */
@@ -21,6 +22,7 @@ export async function renderPage(url: string, options: RenderOptions) {
       "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
     ],
   });
+  let transportFailure: unknown;
   try {
     const context = await browser.newContext({
       viewport: { width: 1440, height: 900 },
@@ -57,10 +59,10 @@ export async function renderPage(url: string, options: RenderOptions) {
         configurable: false,
       });
     });
-    let transportFailure: unknown;
     await context.route("**/*", async (route) => {
       const request = route.request();
       if (
+        transportFailure ||
         request.method() !== "GET" ||
         ["websocket", "eventsource"].includes(request.resourceType()) ||
         (request.isNavigationRequest() && request.url() !== url)
@@ -90,7 +92,10 @@ export async function renderPage(url: string, options: RenderOptions) {
           `Blocked ${request.url()}: ${error instanceof Error ? error.message : String(error)}`,
         );
         const code = (error as { code?: string }).code;
-        if (code && ["BUDGET_LIMIT", "ABORTED"].includes(code))
+        if (
+          code &&
+          ["BUDGET_LIMIT", "ABORTED", "ACCESS_REQUIRED"].includes(code)
+        )
           transportFailure = error;
         await route.abort("blockedbyclient");
       }
@@ -107,8 +112,12 @@ export async function renderPage(url: string, options: RenderOptions) {
       waitUntil: "domcontentloaded",
       timeout: options.timeoutMs ?? 15_000,
     });
+    if (transportFailure) throw transportFailure;
+    await options.checkDom?.(await page.content());
     await page.waitForTimeout(150);
     for (let count = 0; count < 3; count++) {
+      if (transportFailure) throw transportFailure;
+      await options.checkDom?.(await page.content());
       await page.evaluate(() =>
         window.scrollBy(0, Math.min(window.innerHeight, 900)),
       );
@@ -116,6 +125,7 @@ export async function renderPage(url: string, options: RenderOptions) {
     }
     if (transportFailure) throw transportFailure;
     const html = await page.content();
+    await options.checkDom?.(html);
     await context.close();
     return {
       html,
@@ -126,6 +136,8 @@ export async function renderPage(url: string, options: RenderOptions) {
         blocked_requests: blocked,
       },
     };
+  } catch (error) {
+    throw transportFailure ?? error;
   } finally {
     await browser.close();
   }

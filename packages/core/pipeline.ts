@@ -2,7 +2,8 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { resolve, relative, basename } from "node:path";
 import { Store, UpgradeError, hash, inside, uid } from "./index.ts";
 import type { Artifact, Project } from "../contracts/index.ts";
-import { crawlSite, verifyCrawlSnapshots } from "../crawler/index.ts";
+import { crawlSite, verifyCrawlSnapshots, assertNoStoredAccessChallenge } from "../crawler/index.ts";
+import { CrawlError } from "../crawler/network.ts";
 import type { CrawlOptions, CrawlResult } from "../crawler/index.ts";
 import { extractContent } from "../extractor/index.ts";
 import { planRoutes } from "../route-planner/index.ts";
@@ -23,6 +24,7 @@ export interface PipelineOptions {
   maxBytes?: number;
   targetUrl?: string;
   signal?: AbortSignal;
+  accessResume?: { blockId: string; acknowledgementId: string; reason: string };
 }
 export class Pipeline {
   store: Store;
@@ -148,6 +150,17 @@ export class Pipeline {
       this.store.list<ReturnType<typeof loadProfile>>("profile")[0] ??
       loadProfile(p.target.environment_profile);
     const savedOptions = this.store.list<any>("crawl-options")[0];
+    const priorSnapshot = existsSync(inside(this.store.root, "source/crawl.json"));
+    const limitKeys = ["maxPages", "maxAssets", "maxRequests", "maxBytes", "maxWallTimeMs"] as const;
+    if (priorSnapshot && (!savedOptions || limitKeys.some(key => !Number.isFinite(savedOptions[key])))) {
+      this.store.event("crawl.legacy_limits_unknown", "pipeline", {action: "new_explicit_snapshot_required"}, this.store.currentRun().run_id);
+      this.store.setRunStatus("PAUSED");
+      throw new UpgradeError("Legacy crawl limits were not recorded; cannot safely reconstruct them. Preserve this evidence and plan a new project/snapshot with explicit limits", 3);
+    }
+    for (const key of ["maxPages", "maxRequests", "maxBytes"] as const) {
+      if (savedOptions?.[key] !== undefined && this.options[key] !== undefined && this.options[key]! > savedOptions[key])
+        throw new UpgradeError(`Increasing ${key} requires a separately recorded budget decision; automatic resume cannot expand it`, 2);
+    }
     const options: CrawlOptions = {
       sourceUrl: p.source.entry_url,
       projectId: p.project_id,
@@ -156,22 +169,24 @@ export class Pipeline {
       fixtureOrigins: this.options.fixtureOrigin
         ? [this.options.fixtureOrigin]
         : (savedOptions?.fixtureOrigins ?? []),
-      maxPages: this.options.maxPages ?? profile.crawl.max_html_pages,
-      maxAssets: profile.crawl.max_assets,
-      maxRequests: this.options.maxRequests ?? 65000,
-      maxBytes: this.options.maxBytes ?? profile.crawl.max_download_bytes,
-      maxWallTimeMs: profile.crawl.max_wall_time_minutes * 60_000,
-      maxRedirects: profile.crawl.max_redirects,
-      respectRobots: profile.crawl.respect_robots,
-      requestsPerSecond: this.options.fixtureOrigin
+      maxPages: this.options.maxPages ?? savedOptions?.maxPages ?? profile.crawl.max_html_pages,
+      maxAssets: savedOptions?.maxAssets ?? profile.crawl.max_assets,
+      maxRequests: this.options.maxRequests ?? savedOptions?.maxRequests ?? 65000,
+      maxBytes: this.options.maxBytes ?? savedOptions?.maxBytes ?? profile.crawl.max_download_bytes,
+      maxWallTimeMs: savedOptions?.maxWallTimeMs ?? profile.crawl.max_wall_time_minutes * 60_000,
+      maxRedirects: savedOptions?.maxRedirects ?? profile.crawl.max_redirects,
+      respectRobots: savedOptions?.respectRobots ?? profile.crawl.respect_robots,
+      requestsPerSecond: savedOptions?.requestsPerSecond ?? (this.options.fixtureOrigin
         ? 100
-        : profile.crawl.requests_per_second_per_host,
+        : profile.crawl.requests_per_second_per_host),
       signal: this.options.signal,
+      accessResume: this.options.accessResume,
     };
-    this.store.put("crawl-options", "current", {
-      mode: options.mode,
-      fixtureOrigins: options.fixtureOrigins,
-    });
+    // Omission retains the recorded limit; an explicit flag can only lower it during this snapshot.
+    // The one-use access acknowledgement and process signal must never become reusable configuration.
+    const {signal: _signal, accessResume: _accessResume, ...persistentOptions} = options;
+    this.store.put("crawl-options", "current", persistentOptions);
+    this.store.event("crawl.effective_limits", "pipeline", Object.fromEntries(limitKeys.map(key => [key, options[key]])), this.store.currentRun().run_id);
     const result = await crawlSite(options);
     const artifact = this.save("crawl-result.json", result);
     this.save("url-inventory.json", result.entries);
@@ -218,12 +233,33 @@ export class Pipeline {
     }
     return { status: "COMPLETE", artifact };
   }
+  async validateSourceAccess(crawl = this.latest<CrawlResult>("crawl-result.json")) {
+    this.assertOwnership();
+    if (crawl.value.state !== "COMPLETE") {
+      this.store.setRunStatus("PAUSED");
+      this.report();
+      throw new UpgradeError("Crawl incomplete; resume discovery before extraction or build", 3);
+    }
+    await verifyCrawlSnapshots(crawl.value);
+    try {
+      await assertNoStoredAccessChallenge(crawl.value);
+    } catch (error) {
+      if (!(error instanceof CrawlError) || !["ACCESS_REQUIRED", "STORED_ACCESS_CHALLENGE", "ACCESS_REVALIDATION_REQUIRED"].includes(error.code)) throw error;
+      this.save("source-access-error.json", {
+        source_artifact_id: crawl.artifact.artifact_id,
+        code: error.code, reason: error.message, recorded_at: new Date().toISOString(),
+      });
+      this.store.setRunStatus("PAUSED");
+      this.report();
+      throw new UpgradeError(`${error.message}; resume and crawl to record/revalidate source access before extraction`, 3);
+    }
+  }
   async extract() {
     this.phase("PLANNING");
     const crawl = this.latest<CrawlResult>("crawl-result.json");
     if (crawl.value.state !== "COMPLETE")
       throw new UpgradeError("Crawl incomplete; resume discovery", 3);
-    await verifyCrawlSnapshots(crawl.value);
+    await this.validateSourceAccess(crawl);
     const input = hash(
       crawl.artifact.sha256 +
         sourceFingerprint(["packages/extractor", "packages/route-planner"]),
@@ -258,6 +294,7 @@ export class Pipeline {
     };
   }
   async build() {
+    await this.validateSourceAccess();
     this.phase("BUILDING");
     const model = this.latest("content-model.json"),
       routes = this.latest("route-manifest.json");

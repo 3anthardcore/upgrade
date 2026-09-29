@@ -31,3 +31,10 @@ Fixture target — только модель проверки протокола
 Backup сохраняет непротиворечивый снимок, включая текущие leases. После проверки файлов восстановленная независимая копия отсоединяет dispatcher, блокирует незавершённые worker-задачи с новым fence и переносит их резерв в unknown. Исходная копия остаётся неизменной; готовые результаты сохраняют авторство и независимый review. Восстановление состояния не подтверждает исход неизвестной записи в Битрикс.
 
 Успех запуска CLI подтверждается непустым валидным JSON help с ожидаемой версией/командами. Exit 0 недостаточен: старый symlink main guard давал пустой вывод. Проверка выполняется до и после переключения и при rollback. На сервере отказ активации старой r2 фактически вернул рабочую r3 без отката shared data.
+# ADR — HTTP 200 access pages and operator browser evidence, 2026-09-29
+
+Known KillBot titles and Cloudflare challenge headers are access evidence, not content. A robots response containing HTML, including a fragment mislabeled text/plain, cannot become an allow-all policy. The crawler persists the bytes, SHA, URL, stage and block ID before stopping. A retry requires a one-use acknowledgement tied to the current block and a recorded reason; budgets and original start time survive it.
+
+CLI persists effective crawl limits. An omitted flag reuses the previous value; raising it requires a separate budget decision, which this CLI version does not implement. Old snapshots whose original limits were never saved cannot safely resume through the CLI: preserve the evidence and explicitly plan a new project/snapshot. Completed legacy artifacts also require access revalidation before extraction/build; PAUSED discovery cannot build from an older model.
+
+An operator may use the user-requested built-in browser and save observations/resources as untrusted input. That access is recorded separately from the server crawler. Codex desktop tools are not imported into the project's external API. Partial browser observations do not establish the complete URL registry, override robots, clear a server block or prove feature behavior.

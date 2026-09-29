@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   mkdir,
   readFile,
@@ -13,8 +13,16 @@ import { CrawlError, identifyUrl, safeFetch } from "./network.ts";
 import type { HttpResponse } from "./network.ts";
 import { parseRobots, robotsAllows } from "./robots.ts";
 import type { RobotsPolicy } from "./robots.ts";
+import { detectAccessChallenge, isHtmlResponse } from "./access.ts";
+import type {
+  AccessBlock,
+  AccessChallenge,
+  AccessResume,
+  AccessStage,
+} from "./access.ts";
 
 export { identifyUrl, isPublicAddress, safeFetch } from "./network.ts";
+export { detectAccessChallenge } from "./access.ts";
 export type CrawlStatus =
   | "DISCOVERED"
   | "FETCHED"
@@ -85,6 +93,7 @@ export interface CrawlResult {
   started_at: string;
   finished_at?: string;
   state: "COMPLETE" | "PAUSED";
+  access?: { version: 1; active_block_id?: string; blocks: AccessBlock[] };
   entries: CrawlEntry[];
   assets: CrawlAsset[];
   limitations: string[];
@@ -129,6 +138,8 @@ export interface CrawlOptions {
   mode?: "http" | "browser";
   browserExecutablePath?: string;
   browserTimeoutMs?: number;
+  /** One explicit operator acknowledgement for the currently persisted access block. Never reusable. */
+  accessResume?: AccessResume;
   signal?: AbortSignal;
 }
 const digest = (data: string | Buffer) =>
@@ -255,6 +266,12 @@ export async function verifyCrawlSnapshots(result: CrawlResult): Promise<void> {
       file: asset.body_path,
       hash: asset.sha256,
     })),
+    ...(result.access?.blocks ?? []).map((block) => ({
+      file: /^[a-f0-9]{64}$/.test(block.body_sha256)
+        ? path.join(directory, "snapshots", `${block.body_sha256}.bin`)
+        : path.join(directory, "invalid-access-evidence"),
+      hash: block.body_sha256,
+    })),
   ]) {
     if (!item.file) continue;
     const relative = path.relative(directory, path.resolve(item.file));
@@ -270,6 +287,44 @@ export async function verifyCrawlSnapshots(result: CrawlResult): Promise<void> {
       );
     }
   }
+}
+
+async function findStoredAccessChallenge(result: CrawlResult) {
+  for (const entry of result.entries) {
+    if (!["FETCHED", "RENDERED"].includes(entry.status)) continue;
+    for (const item of [
+      { file: entry.body_path, kind: "http" as const, headers: entry.headers },
+      { file: entry.dom_path, kind: "dom" as const, headers: undefined },
+    ]) {
+      if (!item.file) continue;
+      const body = await readFile(item.file);
+      const match = detectAccessChallenge(body, item.headers);
+      if (match) return { entry, body, match, kind: item.kind };
+    }
+  }
+  return undefined;
+}
+
+/** Offline acceptance guard for earlier COMPLETE artifacts; does not mutate evidence or access the source. */
+export async function assertNoStoredAccessChallenge(
+  result: CrawlResult,
+): Promise<void> {
+  if (result.access?.active_block_id)
+    throw new CrawlError(
+      "ACCESS_REQUIRED",
+      `Access block ${result.access.active_block_id} requires explicit resolution`,
+    );
+  const found = await findStoredAccessChallenge(result);
+  if (found)
+    throw new CrawlError(
+      "STORED_ACCESS_CHALLENGE",
+      `Stored ${found.match.provider} challenge at ${found.entry.crawl_key}; run crawl to persist its access gate`,
+    );
+  if (result.access?.version !== 1)
+    throw new CrawlError(
+      "ACCESS_REVALIDATION_REQUIRED",
+      "Legacy crawl lacks access checks for robots.txt; run crawl to revalidate under the existing budgets",
+    );
 }
 
 /** One durable queue writer; no source bytes are interpreted as agent instructions. */
@@ -323,6 +378,7 @@ async function runCrawl(
     fixture_origins: [...(options.fixtureOrigins ?? [])].sort(),
   };
   let state: CrawlResult;
+  let requiresRobotsRevalidation = false;
   let storedState: string | undefined;
   try {
     storedState = await readFile(statePath, "utf8");
@@ -359,6 +415,7 @@ async function runCrawl(
     for (const asset of state.assets)
       if (asset.body_path) asset.body_path = restoredSnapshot(asset.sha256);
     await verifyCrawlSnapshots(state);
+    requiresRobotsRevalidation = state.access?.version !== 1;
   } else {
     state = {
       schema_version: 1,
@@ -367,6 +424,7 @@ async function runCrawl(
       output_dir: outputDir,
       started_at: new Date().toISOString(),
       state: "PAUSED",
+      access: { version: 1, blocks: [] },
       entries: [],
       assets: [],
       limitations: [],
@@ -475,8 +533,168 @@ async function runCrawl(
     saveTail = pending.catch(() => undefined);
     return pending;
   };
+  state.access ??= { version: 1, blocks: [] };
+  const clearExtractedContent = (entry: CrawlEntry) => {
+    for (const key of [
+      "title",
+      "description",
+      "canonical_url",
+      "language",
+      "robots",
+    ] as const)
+      delete entry[key];
+    entry.links = [];
+    entry.media = [];
+    entry.anchors = [];
+    entry.headings = [];
+    entry.structured_data = [];
+  };
+  const blockAccess = async (
+    url: string,
+    stage: AccessStage,
+    body: Buffer | string,
+    match: AccessChallenge,
+    entry?: CrawlEntry,
+    response?: HttpResponse,
+    evidenceKind: "http" | "dom" = "http",
+  ): Promise<never> => {
+    // The active gate is set before asynchronous evidence I/O, stopping queued browser requests as well.
+    const id = `access-${randomUUID()}`;
+    state.access!.active_block_id = id;
+    state.state = "PAUSED";
+    delete state.finished_at;
+    const stored = await snapshot(outputDir, body);
+    state.access!.blocks.push({
+      id,
+      url,
+      stage,
+      ...match,
+      source_entry_url: entry?.crawl_key,
+      body_sha256: stored.hash,
+      evidence_kind: evidenceKind,
+      http_status: response?.status,
+      headers: response?.headers,
+      observed_at: new Date().toISOString(),
+    });
+    if (entry) {
+      entry.status = "REQUIRES_ACCESS";
+      entry.reason = `${match.reason}: ${match.provider ?? "access policy"}; block ${id}`;
+      entry.rule = "ACCESS_REQUIRED";
+      clearExtractedContent(entry);
+      if (stage === "page") {
+        entry.body_path = stored.path;
+        entry.body_sha256 = stored.hash;
+      } else if (evidenceKind === "dom") {
+        entry.dom_path = stored.path;
+        entry.dom_sha256 = stored.hash;
+      }
+    } else {
+      // A controlling robots/sitemap request is evidence for its own URL, never a homepage response.
+      const seed = state.entries.find(
+        (item) => item.crawl_key === source.crawl_key,
+      );
+      if (seed?.status === "DISCOVERED") {
+        seed.reason = `${match.reason} at ${url}; block ${id}`;
+        seed.rule = "ACCESS_REQUIRED";
+      }
+    }
+    addLimitation(
+      `ACCESS_REQUIRED: ${url}; explicit accessResume acknowledgement is required; source defenses are not bypassed`,
+    );
+    await save();
+    throw new CrawlError(
+      "ACCESS_REQUIRED",
+      `Access block ${id} at ${url}: ${match.reason}`,
+    );
+  };
+  const guardResponse = async (
+    response: HttpResponse,
+    stage: AccessStage,
+    entry?: CrawlEntry,
+  ) => {
+    const match =
+      detectAccessChallenge(response.body, response.headers) ??
+      (stage === "robots" &&
+      response.status === 200 &&
+      isHtmlResponse(response.body, response.headers)
+        ? {
+            reason: "ROBOTS_HTML" as const,
+            signals: [
+              "robots.txt HTTP 200 contains HTML instead of a robots policy",
+            ],
+          }
+        : undefined);
+    if (match)
+      await blockAccess(
+        response.url,
+        stage,
+        response.body,
+        match,
+        entry,
+        response,
+      );
+  };
+  if (options.accessResume) {
+    const acknowledgement = options.accessResume;
+    const active = state.access.blocks.find(
+      (item) => item.id === state.access!.active_block_id,
+    );
+    if (
+      !active ||
+      acknowledgement.blockId !== active.id ||
+      !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(
+        acknowledgement.acknowledgementId,
+      ) ||
+      acknowledgement.reason.trim().length < 10 ||
+      acknowledgement.reason.trim().length > 2000 ||
+      state.access.blocks.some(
+        (item) =>
+          item.resume?.acknowledgement_id === acknowledgement.acknowledgementId,
+      )
+    )
+      throw new CrawlError(
+        "INVALID_ACCESS_RESUME",
+        "A fresh acknowledgement ID, current block ID and resolution reason (10..2000 characters) are required",
+      );
+    active.resume = {
+      acknowledgement_id: acknowledgement.acknowledgementId,
+      reason: acknowledgement.reason.trim(),
+      acknowledged_at: new Date().toISOString(),
+    };
+    delete state.access.active_block_id;
+    if (active.source_entry_url) {
+      const entry = state.entries.find(
+        (item) => item.crawl_key === active.source_entry_url,
+      );
+      if (entry?.status === "REQUIRES_ACCESS") {
+        entry.status = "DISCOVERED";
+        clearExtractedContent(entry);
+        delete entry.reason;
+        delete entry.rule;
+      }
+    } else {
+      const seed = state.entries.find(
+        (item) => item.crawl_key === source.crawl_key,
+      );
+      if (seed?.status === "DISCOVERED" && seed.rule === "ACCESS_REQUIRED") {
+        delete seed.reason;
+        delete seed.rule;
+      }
+    }
+    // Acknowledgement permits one resumed observation. Counters, attempts and started_at remain unchanged.
+    await save();
+  } else if (state.access.active_block_id) {
+    state.state = "PAUSED";
+    await save();
+    return state;
+  }
   let lastRequestAt = 0;
   const checkBudget = () => {
+    if (state.access?.active_block_id)
+      throw new CrawlError(
+        "ACCESS_REQUIRED",
+        `Access block ${state.access.active_block_id} is active`,
+      );
     if (options.signal?.aborted)
       throw new CrawlError("ABORTED", "Crawl interrupted");
     if (
@@ -581,8 +799,29 @@ async function runCrawl(
   try {
     state.state = "PAUSED";
     delete state.finished_at;
+    if (requiresRobotsRevalidation) {
+      state.discovery.robots_done = false;
+      addLimitation(
+        "Legacy robots policy requires one access-detection revalidation; existing budgets are retained.",
+      );
+      await save();
+    }
+    const storedChallenge = await findStoredAccessChallenge(state);
+    if (storedChallenge) {
+      const { entry, body, match, kind } = storedChallenge;
+      await blockAccess(
+        entry.final_url ?? entry.crawl_key,
+        "stored_snapshot",
+        body,
+        match,
+        entry,
+        undefined,
+        kind,
+      );
+    }
     if (!state.discovery.robots_done) {
       const { response } = await fetchFollowing(`${source.origin}/robots.txt`);
+      await guardResponse(response, "robots");
       if (
         [401, 403, 429, 503].includes(response.status) ||
         response.status >= 500
@@ -617,6 +856,7 @@ async function runCrawl(
       const url = state.discovery.sitemap_queue[0];
       try {
         const { response } = await fetchFollowing(url);
+        await guardResponse(response, "sitemap");
         if (response.status !== 200) {
           if (response.status !== 404)
             state.discovery.sitemap_failed.push(
@@ -648,7 +888,7 @@ async function runCrawl(
       } catch (error) {
         if (
           error instanceof CrawlError &&
-          ["BUDGET_LIMIT", "ABORTED"].includes(error.code)
+          ["BUDGET_LIMIT", "ABORTED", "ACCESS_REQUIRED"].includes(error.code)
         )
           throw error;
         state.discovery.sitemap_failed.push(`${url}: ${errorText(error)}`);
@@ -700,6 +940,7 @@ async function runCrawl(
         entry.headers = response.headers;
         entry.bytes = response.body.length;
         entry.fetched_at = new Date().toISOString();
+        await guardResponse(response, "page", entry);
         if ([429, 503].includes(response.status)) {
           entry.status = "RATE_LIMITED";
           entry.reason = `HTTP ${response.status}`;
@@ -748,7 +989,24 @@ async function runCrawl(
             if (policy.mode === "browser" && response.status === 200) {
               const { renderPage } = await import("./browser.ts");
               const rendered = await renderPage(response.url, {
-                request,
+                request: async (url) => {
+                  const response = await request(url);
+                  await guardResponse(response, "browser_http", entry);
+                  return response;
+                },
+                checkDom: async (html) => {
+                  const match = detectAccessChallenge(html);
+                  if (match)
+                    await blockAccess(
+                      response.url,
+                      "browser_dom",
+                      html,
+                      match,
+                      entry,
+                      undefined,
+                      "dom",
+                    );
+                },
                 executablePath: options.browserExecutablePath,
                 timeoutMs: options.browserTimeoutMs,
               });
@@ -784,6 +1042,8 @@ async function runCrawl(
         for (const hop of chain) addPage(hop.location, `redirect:${hop.url}`);
         state.counters.pages++;
       } catch (error) {
+        if (error instanceof CrawlError && error.code === "ACCESS_REQUIRED")
+          throw error;
         if (error instanceof CrawlError && error.redirectChain?.length) {
           entry.redirect_chain = error.redirectChain;
           entry.http_status = error.redirectChain[0].status;
@@ -839,6 +1099,7 @@ async function runCrawl(
             ?.split(";")[0]
             .trim()
             .toLowerCase();
+        await guardResponse(response, "asset");
         if (response.status !== 200)
           throw new Error(`Asset HTTP ${response.status}`);
         // SVG/HTML are not copied into a target. Raster-only baseline fails closed for executable formats.
@@ -868,7 +1129,7 @@ async function runCrawl(
       } catch (error) {
         if (
           error instanceof CrawlError &&
-          ["BUDGET_LIMIT", "ABORTED"].includes(error.code)
+          ["BUDGET_LIMIT", "ABORTED", "ACCESS_REQUIRED"].includes(error.code)
         )
           throw error;
         asset.status = "FAILED";

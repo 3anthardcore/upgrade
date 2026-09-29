@@ -75,3 +75,16 @@ API проверены по установленным TypeScript-типам и 
 - Повторные проверки критических фактов во времени/регионе, атомарная выгрузка владельца и нагрузочный профиль 10 000/50 000 не выполнены.
 - В state возможны прежние сообщения о паузе даже после успешного resume: это история ограничений, актуальный статус/очередь указаны отдельно.
 - Следующий шаг: подключить выбранный реальный пилот, явно согласовать scope и медиа; выполнить независимый source→Bitrix URL/content QA. Все target-Битрикс проверки данного подсистемного этапа — **NOT_RUN**.
+# Access gates and restart (r4)
+
+HTTP 200 may still be an access interstitial. A known KillBot document title, Cloudflare challenge header or HTML `robots.txt` produces a durable PAUSED block with SHA evidence. `resume` alone does not retry it. After the operator has obtained legitimate access for the actual crawler, use the current recorded block ID once:
+
+```bash
+upgrade resume --project PROJECT_ID
+upgrade crawl --project PROJECT_ID --ack-access-block access-ACTUAL-ID --access-resolution-reason 'Owner granted access for this crawler'
+upgrade report --project PROJECT_ID
+```
+
+The reason must describe the real resolution, not a proposed bypass. Interactive browser availability alone does not clear a server HTTP block. Source content and scripts remain untrusted data. Known HTTP challenges are rejected before browser fulfillment; DOM detection also catches recognized titles produced by ordinary page rendering, but is not a guarantee against every unknown access system.
+
+Effective limits persist on disk; omitted flags retain them. The current CLI rejects increases and permits explicit reductions. It cannot reconstruct the original limits of legacy snapshots that never recorded them, so those require an explicitly planned new project/snapshot while preserving old evidence. Completed legacy content also needs access validation before extraction or build. New source artifacts supersede only their own access errors; report derives its denominator from the source registry, including unfinished and failed rows.

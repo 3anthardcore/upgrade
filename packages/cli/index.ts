@@ -8,7 +8,7 @@ import {
 } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Store, projectRoot, UpgradeError } from "../core/index.ts";
+import { Store, projectRoot, UpgradeError, uid } from "../core/index.ts";
 import { Pipeline } from "../core/pipeline.ts";
 import { doctor } from "../core/doctor.ts";
 import { loadProfile } from "../core/config.ts";
@@ -74,6 +74,7 @@ export async function main(argv = process.argv.slice(2)) {
         "task create|claim|heartbeat|submit|review",
         "artifact add --project ID --file FILE --type TYPE",
         "crawl|extract|build|verify|report|package --project ID",
+        "crawl|run --project ID --ack-access-block BLOCK_ID --access-resolution-reason TEXT",
         "import --project ID --dry-run",
         "pause|resume|retry|cancel --project ID",
         "backup --project ID --to PATH",
@@ -95,6 +96,14 @@ export async function main(argv = process.argv.slice(2)) {
     print(await restoreProject(text("from", true)!, text("to", true)!));
     return 0;
   }
+  const accessBlock = text("ack-access-block");
+  const accessReason = text("access-resolution-reason");
+  const accessRequested = f["ack-access-block"] !== undefined || f["access-resolution-reason"] !== undefined;
+  if (accessRequested && (
+    !["crawl", "run"].includes(command) || !accessBlock ||
+    !/^access-[A-Za-z0-9-]+$/.test(accessBlock) ||
+    !accessReason || accessReason.trim().length < 10 || accessReason.trim().length > 2000
+  )) throw new UpgradeError("Use crawl/run with --ack-access-block BLOCK_ID and --access-resolution-reason TEXT (10..2000 characters); confirm legitimate source access first");
   const id = text(command === "init" ? "id" : "project", true)!;
   const root = projectRoot(data, id);
   if (command !== "init" && !existsSync(resolve(root, "state/upgrade.db")))
@@ -111,6 +120,9 @@ export async function main(argv = process.argv.slice(2)) {
       ? number("max-bytes", 10_737_418_240)
       : undefined,
     targetUrl: text("target-url"),
+    accessResume: accessRequested ? {
+      blockId: accessBlock!, acknowledgementId: uid("access-ack"), reason: accessReason!.trim(),
+    } : undefined,
   });
   try {
     let value: unknown,
