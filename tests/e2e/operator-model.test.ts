@@ -174,6 +174,36 @@ function fixture(requestTarget = target) {
   };
 }
 type Fixture = ReturnType<typeof fixture>;
+function multipleFixture(extraPage = origin + "/unseen-0") {
+  const f = fixture();
+  f.manifest.capture_id = "capture-multiple-v1";
+  for (const [index, url] of [source, extraPage].entries()) {
+    const html = `<html><head><title>Observed page ${index}</title></head><body><main><h1>Фактическая страница ${index}</h1><p>Наблюдавшийся текст ${index}</p><a href="${f.page.replaceAll("&", "&amp;")}">Карточка</a></main></body></html>`;
+    const file = {
+      relative_path: `observed-${index}.html`,
+      size_bytes: Buffer.byteLength(html),
+      sha256: hash(html),
+    };
+    writeFileSync(join(f.capture, file.relative_path), html);
+    f.manifest.observations.push({
+      file,
+      format: "dom-html",
+      source_url: url,
+      document_url: url,
+      observed_at: timestamp,
+    });
+  }
+  const bytes = JSON.stringify(f.manifest);
+  writeFileSync(join(f.capture, "operator-capture.json"), bytes);
+  const pin = hash(bytes);
+  return {
+    ...f,
+    pin,
+    ingest: { directory: f.capture, expectedManifestSha256: pin },
+    options: { captureId: f.manifest.capture_id, manifestSha256: pin },
+    observedUrls: [source, f.page, extraPage].sort(),
+  };
+}
 function cleanup(dir: string) {
   const path = resolve(dir);
   assert.equal(dirname(path), resolve(tmpdir()));
@@ -683,6 +713,339 @@ test("metadata-only build intent corruption cannot return COMMITTED or conceal r
         .replayed,
       true,
     );
+    assertSourceUnchanged(f.store, f);
+  } finally {
+    f.store.close();
+    cleanup(f.dir);
+  }
+});
+
+test("explicit multipage CLI builds every observed page, keeps legacy single selection and replays offline after restore", async () => {
+  const f = multipleFixture();
+  f.store.close();
+  try {
+    ok(f, [
+      "operator-capture",
+      "ingest",
+      "--directory",
+      f.capture,
+      "--manifest-sha256",
+      f.pin,
+    ]);
+    assert.equal(
+      invoke(f, operatorArgs(f, "model")).status,
+      2,
+      "multiple pages require an explicit selection",
+    );
+    assert.equal(
+      invoke(f, [
+        ...operatorArgs(f, "model"),
+        "--all-observed",
+        "--page",
+        f.page,
+      ]).status,
+      2,
+    );
+    assert.equal(
+      invoke(f, [...operatorArgs(f, "model"), "--all-observed", "false"])
+        .status,
+      2,
+    );
+    const legacyModel = ok(f, [...operatorArgs(f, "model"), "--page", f.page]);
+    assert.equal(legacyModel.operator_binding.schema_version, 1);
+    assert.equal(legacyModel.operator_binding.selected_source_url, f.page);
+    assert.equal(legacyModel.operator_binding.selected_source_urls, undefined);
+    assert.equal(
+      legacyModel.input_hash,
+      hash(
+        JSON.stringify([
+          "operator-model-v1",
+          legacyModel.operator_binding,
+          legacyModel.code_sha256,
+        ]),
+      ),
+    );
+    const legacyBuild = ok(f, [
+      ...operatorArgs(f, "build"),
+      "--model",
+      legacyModel.id,
+    ]);
+    const sealedLegacy = readFileSync(
+      join(legacyBuild.package_dir, "manifest.json"),
+    );
+    const model = ok(f, [...operatorArgs(f, "model"), "--all-observed"]);
+    assert.equal(model.operator_binding.schema_version, 2);
+    assert.equal(model.operator_binding.selection_mode, "ALL_OBSERVED");
+    assert.deepEqual(
+      model.operator_binding.selected_source_urls,
+      f.observedUrls,
+    );
+    assert.equal(model.operator_binding.selected_source_url, undefined);
+    assert.notEqual(model.id, legacyModel.id);
+    assert.equal(
+      model.input_hash,
+      hash(
+        JSON.stringify([
+          "operator-model-v2",
+          model.operator_binding,
+          model.code_sha256,
+        ]),
+      ),
+    );
+    assert.equal(
+      invoke(f, [...operatorArgs(f, "build"), "--model", model.id]).status,
+      2,
+    );
+    assert.equal(
+      invoke(f, [
+        ...operatorArgs(f, "build"),
+        "--model",
+        legacyModel.id,
+        "--all-observed",
+      ]).status,
+      2,
+    );
+    const build = ok(f, [
+      ...operatorArgs(f, "build"),
+      "--model",
+      model.id,
+      "--all-observed",
+    ]);
+    const manifest = await validateBitrixPackage(
+      build.package_dir,
+      "operator-pilot",
+      build.manifest_sha256_package,
+    );
+    assert.equal(manifest.entity_count, 3);
+    assert.equal(manifest.route_count, 3);
+    assert.deepEqual(manifest.blockers, []);
+    assert.match(
+      readFileSync(
+        join(build.package_dir, "code/local/templates/upgrade/header.php"),
+        "utf8",
+      ),
+      /3 из 25 известных URL/,
+    );
+    const packageRoutes = JSON.parse(
+      readFileSync(join(build.package_dir, "data/routes.json"), "utf8"),
+    );
+    assert.deepEqual(
+      packageRoutes.map((route: any) => origin + route.request_target).sort(),
+      f.observedUrls,
+    );
+    assert.ok(
+      packageRoutes.some((route: any) => route.request_target === target),
+    );
+    let store = new Store(f.root);
+    const content = readArtifact(store, model.output_artifact_ids.model);
+    const scope = readArtifact(store, model.output_artifact_ids.scope);
+    assert.equal(content.entities.length, 3);
+    assert.deepEqual(content.prices, []);
+    assert.deepEqual(content.offers, []);
+    assert.deepEqual(
+      content.raw_selected_fields.map((field: any) => field.text),
+      f.selected.fields.map((field) => field.text),
+    );
+    assert.equal(scope.selected_url_count, 3);
+    assert.equal(scope.known_url_count, 25);
+    assert.equal(scope.unresolved_url_count, 22);
+    assert.equal(scope.full_source_denominator, "UNKNOWN");
+    assertSourceUnchanged(store, f);
+    const count = store.list("artifact").length;
+    store.close();
+    const report = JSON.parse(readFileSync(ok(f, ["report"]).json, "utf8"));
+    const info = report.operator_derived.models.find(
+      (item: any) => item.id === model.id,
+    );
+    assert.equal(info.state, "PARTIAL", JSON.stringify(info));
+    assert.equal(info.planned_routes, 3);
+    assert.equal(info.known_urls, 25);
+    assert.equal(info.unresolved_urls, 22);
+    assert.equal(report.operator.registry.dom_observed, 2);
+    assert.equal(report.operator.registry.selected_fields, 1);
+    assert.equal(
+      report.operator_derived.builds.find((item: any) => item.id === build.id)
+        .state,
+      "PARTIAL",
+    );
+    assert.equal(
+      report.operator_derived.models.find(
+        (item: any) => item.id === legacyModel.id,
+      ).state,
+      "PARTIAL",
+    );
+    assert.equal(report.readiness, "NOT_READY");
+    assert.equal(report.source.access.active_block_id, block);
+    assert.equal(report.target.operator_capture_import, "NOT_RUN");
+    assert.deepEqual(
+      readFileSync(join(legacyBuild.package_dir, "manifest.json")),
+      sealedLegacy,
+    );
+    renameSync(f.capture, join(f.dir, "unused-input"));
+    const backup = join(f.dir, "multipage-backup");
+    ok(f, ["backup", "--to", backup]);
+    const restoredData = join(f.dir, "multipage-restored");
+    mkdirSync(restoredData);
+    const restoredRoot = join(restoredData, "operator-pilot");
+    ok(f, ["restore", "--from", backup, "--to", restoredRoot]);
+    renameSync(f.root, join(f.dir, "old-project"));
+    const replay = ok(
+      f,
+      [...operatorArgs(f, "build"), "--model", model.id, "--all-observed"],
+      restoredData,
+    );
+    assert.equal(replay.replayed, true);
+    assert.equal(replay.result_artifact_id, build.result_artifact_id);
+    assert.equal(
+      replay.package_dir,
+      join(restoredRoot, build.package_relative_path),
+    );
+    assert.equal(
+      ok(f, [...operatorArgs(f, "model"), "--all-observed"], restoredData).id,
+      model.id,
+    );
+    assert.equal(
+      ok(f, [...operatorArgs(f, "model"), "--page", f.page], restoredData).id,
+      legacyModel.id,
+    );
+    assert.equal(
+      ok(
+        f,
+        [...operatorArgs(f, "build"), "--model", legacyModel.id],
+        restoredData,
+      ).result_artifact_id,
+      legacyBuild.result_artifact_id,
+    );
+    store = new Store(restoredRoot);
+    assert.equal(store.list("artifact").length, count);
+    assertSourceUnchanged(store, f);
+    store.close();
+  } finally {
+    cleanup(f.dir);
+  }
+});
+
+test("multipage unknown model and release publications reconcile through a restarted offline CLI", async () => {
+  const f = multipleFixture();
+  try {
+    await ingestOperatorCapture(f.store, f.ingest);
+    const publish = f.store.publishArtifact.bind(f.store);
+    f.store.publishArtifact = (
+      ...args: Parameters<Store["publishArtifact"]>
+    ) => {
+      const artifact = publish(...args);
+      if (args[0] === "operator-content-model.json")
+        throw new Error("multipage model acknowledgement lost");
+      return artifact;
+    };
+    await assert.rejects(
+      createOperatorModel(f.store, { ...f.options, allObserved: true }),
+      /acknowledgement lost/,
+    );
+    const pendingModel = f.store.list<any>("operator_model")[0];
+    assert.equal(pendingModel.state, "PENDING");
+    f.store.close();
+    const model = ok(f, [...operatorArgs(f, "model"), "--all-observed"]);
+    assert.equal(model.id, pendingModel.id);
+    const store = new Store(f.root);
+    const publishRelease = store.publishArtifact.bind(store);
+    store.publishArtifact = (...args: Parameters<Store["publishArtifact"]>) => {
+      const artifact = publishRelease(...args);
+      if (args[0] === "operator-release-manifest.json")
+        throw new Error("multipage release acknowledgement lost");
+      return artifact;
+    };
+    let pendingBuild: any;
+    try {
+      await assert.rejects(
+        buildOperatorPackage(store, {
+          ...f.options,
+          modelId: model.id,
+          allObserved: true,
+        }),
+        /acknowledgement lost/,
+      );
+      pendingBuild = store.list<any>("operator_build")[0];
+      assert.equal(pendingBuild.state, "PENDING");
+    } finally {
+      store.close();
+    }
+    const build = ok(f, [
+      ...operatorArgs(f, "build"),
+      "--model",
+      model.id,
+      "--all-observed",
+    ]);
+    assert.equal(build.id, pendingBuild.id);
+    assert.equal(
+      build.manifest_sha256_package,
+      pendingBuild.manifest_sha256_package,
+    );
+    const restarted = new Store(f.root);
+    try {
+      for (const type of [
+        "operator-content-model.json",
+        "operator-route-manifest.json",
+        "operator-scope-manifest.json",
+        "operator-release-manifest.json",
+      ])
+        assert.equal(
+          restarted
+            .list<Artifact>("artifact")
+            .filter((artifact) => artifact.type === type).length,
+          1,
+          type,
+        );
+      assert.equal(
+        readArtifact(restarted, model.output_artifact_ids.scope)
+          .unresolved_url_count,
+        22,
+      );
+      assertSourceUnchanged(restarted, f);
+    } finally {
+      restarted.close();
+    }
+  } finally {
+    cleanup(f.dir);
+  }
+});
+
+test("all-observed cannot silently omit an unsafe page or replay a narrowed selection", async () => {
+  const f = multipleFixture(origin + "/bitrix/admin/captured.php");
+  try {
+    await ingestOperatorCapture(f.store, f.ingest);
+    const model = await createOperatorModel(f.store, {
+      ...f.options,
+      allObserved: true,
+    });
+    const routes = readArtifact(f.store, model.output_artifact_ids.routes);
+    assert.equal(routes.routes.length, 2);
+    assert.equal(routes.conflicts.length, 1);
+    const scope = readArtifact(f.store, model.output_artifact_ids.scope);
+    assert.equal(scope.selected_url_count, 3);
+    assert.equal(scope.known_url_count, 26);
+    assert.equal(scope.unresolved_url_count, 24);
+    await assert.rejects(
+      buildOperatorPackage(f.store, {
+        ...f.options,
+        modelId: model.id,
+        allObserved: true,
+      }),
+      /no route conflicts/,
+    );
+    const original: any = f.store.get("operator_model", model.id);
+    f.store.put("operator_model", model.id, {
+      ...original,
+      operator_binding: {
+        ...original.operator_binding,
+        selected_source_urls: [source],
+      },
+    });
+    await assert.rejects(
+      createOperatorModel(f.store, { ...f.options, allObserved: true }),
+      /intent mismatch/,
+    );
+    assert.equal(f.store.list("operator_build").length, 0);
     assertSourceUnchanged(f.store, f);
   } finally {
     f.store.close();

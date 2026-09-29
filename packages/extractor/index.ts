@@ -20,7 +20,15 @@ export interface Fact<T = unknown> {
 }
 export interface ContentBlock {
   type:
-    "heading" | "paragraph" | "list" | "table" | "image" | "document" | "quote";
+    | "heading"
+    | "paragraph"
+    | "list"
+    | "table"
+    | "image"
+    | "document"
+    | "quote"
+    | "link"
+    | "card";
   text?: string;
   level?: number;
   items?: string[];
@@ -28,6 +36,8 @@ export interface ContentBlock {
   source_url?: string;
   asset_sha256?: string;
   alt?: string;
+  /** Same-origin source path and exact query for inert target navigation, never an action or external URL. */
+  request_target?: string;
 }
 export interface ContentEntity {
   source_id: string;

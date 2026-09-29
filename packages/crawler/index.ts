@@ -167,7 +167,7 @@ export function inspectHtml(html: string, base: string) {
     links = new Set<string>(),
     media = new Set<string>();
   const resolveUrl = (value: string | undefined) => {
-    if (!value || /^(?:data|javascript|mailto|tel|blob):/i.test(value))
+    if (!value?.trim() || /^(?:data|javascript|mailto|tel|blob):/i.test(value.trim()))
       return undefined;
     try {
       return identifyUrl(value.trim(), base).raw_url;

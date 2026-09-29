@@ -33,6 +33,7 @@ async function fixture(
     seedOnly?: boolean;
     ingest?: boolean;
     missingPdf?: boolean;
+    secondPage?: boolean;
   } = {},
 ) {
   const directory = mkdtempSync(join(tmpdir(), "upgrade-operator-report-"));
@@ -146,6 +147,28 @@ async function fixture(
     ],
     assets,
   };
+  if (options.secondPage) {
+    const payload = JSON.stringify({
+      ...selected,
+      source_url: seed,
+      document_title: "Observed catalog root",
+      links: [],
+      asset_urls: [],
+    });
+    const secondFile = {
+      relative_path: "root.json",
+      sha256: hash(payload),
+      size_bytes: Buffer.byteLength(payload),
+    };
+    writeFileSync(join(capture, secondFile.relative_path), payload);
+    manifest.observations.push({
+      source_url: seed,
+      document_url: seed,
+      observed_at: "2026-09-29T04:00:00.000Z",
+      format: "selected-fields-json",
+      file: secondFile,
+    });
+  }
   const manifestBytes = JSON.stringify(manifest);
   writeFileSync(join(capture, "operator-capture.json"), manifestBytes);
   const ingestOptions = {
@@ -688,6 +711,86 @@ test("pending derived records cannot claim model or package success", async () =
     assert.equal(data.operator_derived.builds[0].state, "PENDING");
     assert.equal(data.operator_derived.builds[0].planned_routes, undefined);
     assert.equal(data.readiness, "NOT_READY");
+  } finally {
+    cleanup(f);
+  }
+});
+
+test("multipage derived reports retain the full registry, coexist with v1 and reject an ALL_OBSERVED subset claim", async () => {
+  const f = await fixture({ secondPage: true });
+  try {
+    const options = {
+      captureId: f.receipt.capture_id,
+      manifestSha256: f.receipt.manifest_sha256,
+    };
+    const legacy = await createOperatorModel(f.store, {
+      ...options,
+      page: observed,
+    });
+    const multiple = await createOperatorModel(f.store, {
+      ...options,
+      allObserved: true,
+    });
+    const build = await buildOperatorPackage(f.store, {
+      ...options,
+      modelId: multiple.id,
+      allObserved: true,
+    });
+    const first = report(f.store);
+    assert.equal(first.data.operator.registry.known_urls, 4);
+    assert.equal(first.data.operator.registry.selected_fields, 2);
+    assert.equal(first.data.operator.registry.unobserved, 2);
+    const info = first.data.operator_derived.models.find(
+      (model: any) => model.id === multiple.id,
+    );
+    assert.equal(info.state, "PARTIAL", JSON.stringify(info));
+    assert.equal(info.selection_mode, "ALL_OBSERVED");
+    assert.deepEqual(info.selected_source_urls, [seed, observed].sort());
+    assert.equal(info.entities, 2);
+    assert.equal(info.planned_routes, 2);
+    assert.equal(info.known_urls, 4);
+    assert.equal(info.unresolved_urls, 2);
+    assert.equal(
+      first.data.operator_derived.models.find(
+        (model: any) => model.id === legacy.id,
+      ).state,
+      "PARTIAL",
+    );
+    assert.equal(
+      first.data.operator_derived.builds.find(
+        (item: any) => item.id === build.id,
+      ).state,
+      "PARTIAL",
+    );
+    assert.equal(first.data.target.operator_capture_import, "NOT_RUN");
+    assert.equal(first.data.source.access.active_block_id, block);
+    assert.equal(first.data.readiness, "NOT_READY");
+    assert.match(first.data.next_step, /выбранные маршруты \(2\)/);
+    for (const rendered of [first.html, first.md])
+      assert.match(rendered, /ALL(?:_|\\_)OBSERVED/);
+    const saved = f.store.get<any>("operator_model", multiple.id);
+    f.store.put("operator_model", multiple.id, {
+      ...saved,
+      operator_binding: {
+        ...saved.operator_binding,
+        selected_source_urls: [observed],
+      },
+    });
+    const after = report(f.store).data;
+    const rejected = after.operator_derived.models.find(
+      (model: any) => model.id === multiple.id,
+    );
+    assert.equal(rejected.state, "INVALID");
+    assert.match(rejected.issues.join(" "), /ALL_OBSERVED must select every/);
+    assert.equal(
+      after.operator_derived.builds.find((item: any) => item.id === build.id)
+        .state,
+      "INVALID",
+    );
+    assert.equal(after.operator.registry.known_urls, 4);
+    assert.equal(after.operator.registry.selected_fields, 2);
+    assert.equal(after.source.access.active_block_id, block);
+    assert.equal(after.readiness, "NOT_READY");
   } finally {
     cleanup(f);
   }

@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { Ajv } from "ajv";
 import { load } from "cheerio";
+import type { CheerioAPI } from "cheerio";
+import type { AnyNode, Element } from "domhandler";
 import { detectAccessChallenge, isHtmlResponse } from "../crawler/access.ts";
 import { identifyUrl } from "../crawler/network.ts";
 import {
@@ -110,6 +112,173 @@ function selectedFieldLabel(name: string): string {
   return name;
 }
 
+const inactiveDom =
+  'script,style,button,input,textarea,select,iframe,frame,object,embed,svg,math,template,noscript,[hidden],[aria-hidden="true"]';
+const structuralTags = new Set([
+  "div",
+  "section",
+  "article",
+  "main",
+  "aside",
+  "header",
+  "footer",
+  "address",
+  "dl",
+  "dt",
+  "dd",
+  "figure",
+  "figcaption",
+  "details",
+  "summary",
+]);
+const atomicTags = new Set([
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "p",
+  "ul",
+  "ol",
+  "table",
+  "blockquote",
+]);
+const isElement = (node: AnyNode): node is Element => "tagName" in node;
+const explicitlyHiddenStyle =
+  /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\s*(?:!important\s*)?(?:;|$)/i;
+
+function cleanPrimaryDom($: CheerioAPI, root: Element, bodyFallback = false) {
+  const main = $(root);
+  main.find(inactiveDom).remove();
+  main.find("nav,aside").remove();
+  if (bodyFallback) main.find("header,footer").remove();
+  main.find("[style]").each((_i, node) => {
+    if (explicitlyHiddenStyle.test($(node).attr("style") ?? ""))
+      $(node).remove();
+  });
+  // Product/review copy may live inside a form. Preserve inert text, not fields or actions.
+  main.find("form").each((_i, node) => {
+    $(node).replaceWith($(node).contents());
+  });
+  return main;
+}
+
+/** The selector is an auditable heuristic, not proof that a page is complete. */
+function primaryDom($: CheerioAPI) {
+  const usable = (node: Element) => {
+    if (
+      $(node).is('[hidden],[aria-hidden="true"]') ||
+      $(node).parents('[hidden],[aria-hidden="true"],nav,header,footer,aside')
+        .length ||
+      $(node)
+        .parents("[style]")
+        .add(node)
+        .toArray()
+        .some((parent) =>
+          explicitlyHiddenStyle.test($(parent).attr("style") ?? ""),
+        )
+    )
+      return false;
+    // Inspect the same inert content that extraction will retain, without
+    // changing original nodes used for source locators and metadata evidence.
+    const retained = cleanPrimaryDom($, $(node).clone().get(0)!);
+    return Boolean(retained.text().trim() || retained.find("img").length);
+  };
+  for (const selector of [
+    "main",
+    '[role="main"]',
+    "#content",
+    "#main",
+    "#main-content",
+  ]) {
+    const candidates = $(selector)
+      .toArray()
+      .filter((node): node is Element => isElement(node) && usable(node));
+    if (candidates.length === 1) return { node: $(candidates[0]), selector };
+  }
+  const articles = $("article")
+    .toArray()
+    .filter((node): node is Element => isElement(node) && usable(node));
+  const pageHeading = $("body h1").first().get(0);
+  if (
+    articles.length === 1 &&
+    (!pageHeading ||
+      $(articles[0])
+        .find("h1")
+        .toArray()
+        .includes(pageHeading as Element))
+  )
+    return { node: $(articles[0]), selector: "article" };
+  return { node: $("body"), selector: "body" };
+}
+
+function originalLocators(root: Element): WeakMap<AnyNode, string> {
+  const locators = new WeakMap<AnyNode, string>();
+  const stack: Array<{ node: AnyNode; locator: string; depth: number }> = [
+    { node: root, locator: root.tagName, depth: 0 },
+  ];
+  while (stack.length) {
+    const { node, locator, depth } = stack.pop()!;
+    if (depth > 200) fail("OPERATOR_LIMIT", "DOM nesting exceeds 200 levels");
+    locators.set(node, locator);
+    if (!("children" in node)) continue;
+    const tags = new Map<string, number>();
+    for (const [index, child] of node.children.entries()) {
+      const tag = isElement(child) ? child.tagName : "text()";
+      const order = (tags.get(tag) ?? 0) + 1;
+      tags.set(tag, order);
+      stack.push({
+        node: child,
+        locator: `${locator} > ${tag}${tag === "text()" ? `[${index}]` : `:nth-of-type(${order})`}`,
+        depth: depth + 1,
+      });
+    }
+  }
+  return locators;
+}
+
+/** Restrict observations used as target navigation; exact accepted source identities are never rewritten. */
+function navigationTarget(
+  raw: string,
+  documentUrl: string,
+  origin: string,
+): string | undefined {
+  if (!raw.trim() || raw.startsWith("#") || /[\u0000-\u0020\\]/.test(raw))
+    return;
+  try {
+    const identity = identifyUrl(raw, documentUrl);
+    if (identity.origin !== origin || mediaExtension.test(identity.raw_url))
+      return;
+    const url = new URL(identity.raw_url);
+    const decodedPath = decodeURIComponent(url.pathname);
+    if (
+      /(?:^|\/)(?:cart|checkout|payment|payments|order|orders|login|logout|register|account|wishlist|compare|admin|bitrix|local|api|add|remove|delete)(?:[/.]|$)/i.test(
+        decodedPath,
+      )
+    )
+      return;
+    for (const [key, value] of url.searchParams) {
+      if (
+        /^(?:action|do|act|add|remove|delete|submit|checkout|logout|login|payment|order|quantity|cart|token|sessid|csrf|csrf_token)$/i.test(
+          key,
+        )
+      )
+        return;
+      if (
+        key.toLowerCase() === "route" &&
+        /(?:^|\/)(?:account|checkout|payment|api|tool|cart|compare|wishlist)(?:\/|$)/i.test(
+          value,
+        )
+      )
+        return;
+    }
+    return identity.request_target;
+  } catch {
+    return;
+  }
+}
+
 function safeRelativePath(value: string) {
   if (
     value.length > 240 ||
@@ -161,6 +330,7 @@ function structuredCandidates(
   raw: string,
   locator: string,
   documentUrl: string,
+  baseUrl = documentUrl,
 ): StructuredCandidate[] {
   let parsed: unknown;
   try {
@@ -208,7 +378,7 @@ function structuredCandidates(
     if (binding) {
       try {
         bound =
-          identifyUrl(binding, documentUrl).crawl_key ===
+          identifyUrl(binding, baseUrl).crawl_key ===
           identifyUrl(documentUrl).crawl_key;
       } catch {
         /* Invalid source data never changes scope. */
@@ -453,6 +623,12 @@ export async function extractOperatorContent(
   }
   const missing = new Set<string>();
   const mediaFor = (raw: string, sourceUrl: string, baseUrl: string) => {
+    if (!raw.trim()) {
+      limitations.add(
+        `Missing source media address at ${sourceUrl}; no image URL is inferred from the document or base URL.`,
+      );
+      return undefined;
+    }
     let identity;
     try {
       identity = identifyUrl(raw, baseUrl);
@@ -545,18 +721,26 @@ export async function extractOperatorContent(
       evidence: [evidence(`operator:${observation.format}`)],
       assets: [],
     };
-    const attachMedia = (raw: string, alt = "") => {
-      const asset = mediaFor(raw, identity.crawl_key, document.crawl_key);
+    let documentBaseUrl = document.crawl_key;
+    const observeMedia = (raw: string) => {
+      const asset = mediaFor(raw, identity.crawl_key, documentBaseUrl);
       if (!asset) return;
       if (!entity.assets.includes(asset.source_url))
         entity.assets.push(asset.source_url);
+      return asset;
+    };
+    const attachMedia = (raw: string, alt = "", locator?: string) => {
+      const asset = observeMedia(raw);
+      if (!asset) return;
       if (asset.operator_bytes === "VERIFIED" && asset.sha256)
         entity.blocks.push({
           type: asset.mime === "application/pdf" ? "document" : "image",
           source_url: asset.source_url,
           asset_sha256: asset.sha256,
           alt,
+          ...(asset.mime === "application/pdf" ? { text: alt } : {}),
         });
+      if (locator) entity.evidence.push(evidence(locator));
     };
     if (observation.format === "selected-fields-json") {
       let parsed: unknown;
@@ -631,13 +815,34 @@ export async function extractOperatorContent(
       if (detectAccessChallenge(html))
         fail("OPERATOR_CHALLENGE", "Known access challenge in DOM evidence");
       const $ = load(html);
+      const baseHref = $("base[href]").first().attr("href");
+      if (baseHref) {
+        entity.facts["dom:base_href"] = fact(baseHref, "base[href]:first@href");
+        try {
+          documentBaseUrl = identifyUrl(baseHref, document.crawl_key).raw_url;
+        } catch {
+          fail(
+            "OPERATOR_FORMAT",
+            "Unsupported or invalid DOM base URL requires review",
+          );
+        }
+        if (identifyUrl(documentBaseUrl).origin !== sourceOrigin)
+          limitations.add(
+            `External DOM base at ${identity.crawl_key}; relative navigation/media cannot become local content.`,
+          );
+      }
       const primaryCandidates: StructuredCandidate[] = [];
       $('script[type="application/ld+json"]').each((index, node) => {
         const raw = $(node).text();
         const locator = `script[type="application/ld+json"][${index}]`;
         entity.facts[`operator_jsonld:${index}`] = fact(raw, locator);
         primaryCandidates.push(
-          ...structuredCandidates(raw, locator, document.crawl_key),
+          ...structuredCandidates(
+            raw,
+            locator,
+            document.crawl_key,
+            documentBaseUrl,
+          ),
         );
       });
       const primary =
@@ -663,6 +868,101 @@ export async function extractOperatorContent(
       const title = $("title").first().text();
       const description =
         $('meta[name="description"]').first().attr("content") ?? "";
+      const siteNames = $('meta[property="og:site_name"]')
+        .toArray()
+        .map((node) => $(node).attr("content"))
+        .filter((value): value is string => Boolean(value?.trim()));
+      if (new Set(siteNames).size === 1)
+        entity.facts["dom:site_name"] = fact(
+          siteNames[0],
+          'meta[property="og:site_name"]@content',
+        );
+      if (document.request_target === "/") {
+        const navigation: Array<{ label: string; request_target: string }> = [];
+        const navigationPairs = new Set<string>();
+        $('header nav a[href],[role="banner"] nav a[href]').each(
+          (_i, anchor) => {
+            const node = $(anchor);
+            if (
+              Object.keys(anchor.attribs).some((name) => /^on/i.test(name)) ||
+              node.is(
+                '[role="button"],[data-cart],[data-action],[hidden],[aria-hidden="true"]',
+              ) ||
+              node.parents('[hidden],[aria-hidden="true"],template,noscript')
+                .length ||
+              node
+                .parents("[style]")
+                .add(anchor)
+                .toArray()
+                .some((parent) =>
+                  explicitlyHiddenStyle.test($(parent).attr("style") ?? ""),
+                )
+            )
+              return;
+            const target = navigationTarget(
+              node.attr("href")!,
+              documentBaseUrl,
+              sourceOrigin,
+            );
+            if (!target) return;
+            const label = cleanPrimaryDom($, node.clone().get(0)!).text();
+            if (!label.trim()) return;
+            const key = JSON.stringify([label, target]);
+            if (navigationPairs.has(key)) return;
+            navigationPairs.add(key);
+            navigation.push({ label, request_target: target });
+          },
+        );
+        if (navigation.length)
+          entity.facts["dom:primary_navigation"] = fact(
+            navigation,
+            "homepage header nav/[role=banner] nav a[href] inert textContent and same-origin safe request target",
+          );
+        const images = $('meta[property="og:image"]')
+          .toArray()
+          .map((node) => $(node).attr("content"))
+          .filter((value): value is string => Boolean(value));
+        const expected = new Set<string>();
+        for (const raw of images) {
+          try {
+            const image = identifyUrl(raw, documentBaseUrl);
+            if (image.origin === sourceOrigin) expected.add(image.crawl_key);
+          } catch {
+            /* Untrusted metadata cannot authorize external content. */
+          }
+        }
+        const alts: string[] = [];
+        if (expected.size === 1)
+          $('header a[href] img,[role="banner"] a[href] img').each(
+            (_i, image) => {
+              const anchor = $(image).closest("a"),
+                href = anchor.attr("href") ?? "",
+                alt = $(image).attr("alt") ?? "";
+              if (!alt.trim() || href.startsWith("#")) return;
+              try {
+                const home = identifyUrl(href, documentBaseUrl),
+                  src = identifyUrl(
+                    $(image).attr("src") ?? "",
+                    documentBaseUrl,
+                  );
+                if (
+                  home.origin === sourceOrigin &&
+                  home.request_target === "/" &&
+                  !home.fragment &&
+                  expected.has(src.crawl_key)
+                )
+                  alts.push(alt);
+              } catch {
+                /* Invalid source URL remains untrusted text. */
+              }
+            },
+          );
+        if (new Set(alts).size === 1)
+          entity.facts["dom:home_logo_alt"] = fact(
+            alts[0],
+            'header/[role=banner] root link img@alt with src matching the unique same-origin meta[property="og:image"]',
+          );
+      }
       const canonical = $('link[rel="canonical"]').first().attr("href");
       if (canonical) {
         entity.facts["dom:canonical"] = fact(
@@ -670,7 +970,7 @@ export async function extractOperatorContent(
           "link[rel=canonical]@href",
         );
         try {
-          const target = identifyUrl(canonical, document.crawl_key);
+          const target = identifyUrl(canonical, documentBaseUrl);
           if (target.origin === sourceOrigin)
             entity.seo.canonical_url = target.raw_url;
           else
@@ -713,19 +1013,46 @@ export async function extractOperatorContent(
           target_implementation: null,
           test: null,
         });
-      const main = $("main").first().length
-        ? $("main").first()
-        : $("article").first().length
-          ? $("article").first()
-          : $("body");
-      main
-        .find(
-          'script,style,nav,header,footer,form,button,input,textarea,select,iframe,frame,object,embed,svg,math,template,noscript,[hidden],[aria-hidden="true"]',
-        )
-        .remove();
+      const chosen = primaryDom($),
+        main = chosen.node;
+      const mainElement = main.get(0);
+      if (!mainElement || !isElement(mainElement))
+        throw new OperatorExtractionError(
+          "OPERATOR_FORMAT",
+          "HTML has no primary content root",
+        );
+      const sourceLocators = originalLocators(mainElement);
+      const locator = (node: AnyNode) =>
+        `${chosen.selector}: ${sourceLocators.get(node) ?? "source descendant"}`;
+      entity.facts["dom:primary_content"] = fact(
+        chosen.selector,
+        `${chosen.selector} selected by landmark heuristic`,
+      );
+      limitations.add(
+        `Primary content at ${identity.crawl_key} uses ${chosen.selector}; this is a DOM heuristic, not computed visibility or complete-page coverage.`,
+      );
+      cleanPrimaryDom($, mainElement, chosen.selector === "body");
+      const missingImageSources = main
+        .find("img")
+        .toArray()
+        .filter((image) => !($(image).attr("src") ?? "").trim())
+        .map((image) => ({
+          raw_src: $(image).attr("src") ?? null,
+          alt: $(image).attr("alt") ?? "",
+          locator: locator(image) + "@src",
+        }));
+      if (missingImageSources.length) {
+        entity.facts["dom:missing_image_sources"] = fact(
+          missingImageSources,
+          `${chosen.selector} img with absent or blank src; image URL and content not established`,
+        );
+        limitations.add(
+          `Missing source image address at ${identity.crawl_key}; ${missingImageSources.length} image(s) have absent or blank src, with no replacement inferred.`,
+        );
+      }
       entity.facts["dom:visible_text"] = fact(
         main.text(),
-        "main/article/body textContent after inactive/hidden content removal",
+        `${chosen.selector} textContent after inactive/explicitly hidden content removal; computed CSS visibility unknown`,
       );
       const h1 = main.find("h1").first().text() || null;
       entity.title = title || h1 || textValue(primary?.value.name) || "";
@@ -738,74 +1065,400 @@ export async function extractOperatorContent(
         language: $("html").attr("lang") ?? null,
       };
       if (h1) {
-        entity.facts["dom:h1"] = fact(h1, "main/article/body h1");
+        entity.facts["dom:h1"] = fact(
+          h1,
+          locator(main.find("h1").first().get(0)!),
+        );
         if (entity.facts.name.value === null)
-          entity.facts.name = fact(h1, "main/article/body h1");
+          entity.facts.name = fact(
+            h1,
+            locator(main.find("h1").first().get(0)!),
+          );
       }
       if (description)
         entity.facts.description = fact(
           description,
           "meta[name=description]@content",
         );
-      main
-        .find("h1,h2,h3,h4,h5,h6,p,ul,ol,table,blockquote,img,a[href]")
-        .each((index, element) => {
-          const node = $(element);
-          if (node.parents("ul,ol,table,blockquote").length) return;
-          const tag = element.tagName,
-            text = node.text().trim();
-          let block: ContentBlock | undefined;
-          if (/^h[1-6]$/.test(tag) && text)
-            block = { type: "heading", level: Number(tag[1]), text };
-          else if (tag === "p" && text) block = { type: "paragraph", text };
-          else if (tag === "ul" || tag === "ol")
-            block = {
-              type: "list",
-              items: node
-                .children("li")
-                .map((_i, item) => $(item).text().trim())
-                .get(),
-            };
-          else if (tag === "table")
-            block = {
-              type: "table",
-              rows: node
-                .find("tr")
-                .toArray()
-                .map((row) =>
-                  $(row)
-                    .find("th,td")
-                    .toArray()
-                    .map((cell) => $(cell).text().trim()),
-                ),
-            };
-          else if (tag === "blockquote" && text)
-            block = { type: "quote", text };
-          else if (tag === "img")
-            attachMedia(node.attr("src") ?? "", node.attr("alt") ?? "");
-          else if (
-            tag === "a" &&
-            /\.pdf(?:[?#]|$)/i.test(node.attr("href") ?? "")
+      type ObservedLink = {
+        label: string;
+        raw_href: string;
+        request_target: string;
+        locator: string;
+        image_source_url?: string;
+        image_asset_sha256?: string;
+      };
+      const observedLinks: ObservedLink[] = [],
+        linkByNode = new WeakMap<Element, ObservedLink>();
+      main.find("a[href]").each((_i, node) => {
+        if (
+          Object.keys(node.attribs).some((name) => /^on/i.test(name)) ||
+          $(node).is('[role="button"],[data-cart],[data-action]')
+        )
+          return;
+        const target = navigationTarget(
+          $(node).attr("href")!,
+          documentBaseUrl,
+          sourceOrigin,
+        );
+        if (
+          !target ||
+          assets.has(
+            identifyUrl($(node).attr("href")!, documentBaseUrl).crawl_key,
           )
-            attachMedia(node.attr("href")!, text);
-          if (block) {
-            entity.blocks.push(block);
-            entity.evidence.push(
-              evidence(`main/article/body ${tag}[${index}]`),
-            );
+        )
+          return;
+        const images = $(node).find("img").toArray(),
+          rawLabel = $(node).text();
+        const label = rawLabel.trim()
+          ? rawLabel
+          : images.length === 1
+            ? ($(images[0]).attr("alt") ?? "")
+            : "";
+        const link: ObservedLink = {
+          label,
+          raw_href: $(node).attr("href")!,
+          request_target: target,
+          locator:
+            locator(node) + (rawLabel.trim() ? " textContent" : " img@alt"),
+        };
+        if (images.length === 1) {
+          const asset = observeMedia($(images[0]).attr("src") ?? "");
+          if (asset) {
+            link.image_source_url = asset.source_url;
+            if (
+              asset.operator_bytes === "VERIFIED" &&
+              asset.mime?.startsWith("image/")
+            )
+              link.image_asset_sha256 = asset.sha256;
           }
+        }
+        observedLinks.push(link);
+        linkByNode.set(node, link);
+      });
+      entity.facts["dom:links"] = fact(
+        observedLinks,
+        `${chosen.selector} a[href]; observed labels/targets, never implementation of source actions`,
+      );
+      type ObservedCard = ObservedLink & { items: string[] };
+      const cardsByNode = new WeakMap<Element, ObservedCard>(),
+        observedCards: ObservedCard[] = [];
+      const cardCandidate = (element: Element): ObservedCard | undefined => {
+        const headings = $(element)
+          .find(
+            "h1 a[href],h2 a[href],h3 a[href],h4 a[href],h5 a[href],h6 a[href]",
+          )
+          .toArray();
+        const links = headings
+          .map((node) => linkByNode.get(node))
+          .filter((link): link is ObservedLink => Boolean(link));
+        if (headings.length !== 1 || links.length !== 1) return;
+        const link = links[0];
+        if (!link.label.trim()) return;
+        const images = $(element)
+          .find("a[href] img")
+          .toArray()
+          .filter((image) => {
+            const anchor = $(image).closest("a").get(0);
+            return (
+              anchor &&
+              isElement(anchor) &&
+              linkByNode.get(anchor)?.request_target === link.request_target
+            );
+          });
+        const imageUrls = new Set(
+          images.map((image) => $(image).attr("src")).filter(Boolean),
+        );
+        if (!images.length || imageUrls.size !== 1) return;
+        const card: ObservedCard = {
+          ...link,
+          locator: locator(element),
+          items: [],
+        };
+        const asset = observeMedia($(images[0]).attr("src") ?? "");
+        if (asset) {
+          card.image_source_url = asset.source_url;
+          if (
+            asset.operator_bytes === "VERIFIED" &&
+            asset.mime?.startsWith("image/")
+          )
+            card.image_asset_sha256 = asset.sha256;
+        }
+        const copy = $(element).clone();
+        copy.find("h1,h2,h3,h4,h5,h6,img").remove();
+        copy.find("a").each((_i, anchor) => {
+          if (
+            /^(?:купить|в\s+корзину|добавить\s+в\s+корзину|заказать|buy|add\s+to\s+cart|order)$/i.test(
+              $(anchor).text().trim(),
+            )
+          )
+            $(anchor).remove();
         });
+        const chunks = (node: Element, depth = 0) => {
+          if (depth > 200)
+            fail("OPERATOR_LIMIT", "DOM nesting exceeds 200 levels");
+          if (atomicTags.has(node.tagName) || node.tagName === "li") {
+            const value = $(node).text().trim();
+            if (value) card.items.push(value);
+            return;
+          }
+          let inline = "";
+          const flush = () => {
+            if (inline.trim()) card.items.push(inline.trim());
+            inline = "";
+          };
+          for (const child of node.children) {
+            if (child.type === "text") inline += child.data;
+            else if (isElement(child)) {
+              if (child.tagName === "br") inline += "\n";
+              else if (
+                structuralTags.has(child.tagName) ||
+                atomicTags.has(child.tagName) ||
+                $(child).find([...structuralTags, ...atomicTags].join(","))
+                  .length
+              ) {
+                flush();
+                chunks(child, depth + 1);
+              } else inline += $(child).text();
+            }
+          }
+          flush();
+        };
+        const copyRoot = copy.get(0);
+        if (copyRoot && isElement(copyRoot)) chunks(copyRoot);
+        return card;
+      };
+      // Repeated sibling structure, not a CMS class or hostname, establishes grouping.
+      main
+        .find("*")
+        .add(main)
+        .each((_i, parent) => {
+          const candidates = $(parent)
+            .children()
+            .toArray()
+            .filter(isElement)
+            .map((node) => ({ node, card: cardCandidate(node) }))
+            .filter((entry): entry is { node: Element; card: ObservedCard } =>
+              Boolean(entry.card),
+            );
+          const groups = new Map<string, typeof candidates>();
+          for (const item of candidates) {
+            const signature =
+              item.node.tagName +
+              ":" +
+              $(item.node)
+                .children()
+                .toArray()
+                .filter(isElement)
+                .map((node) => node.tagName)
+                .join(",");
+            const group = groups.get(signature) ?? [];
+            group.push(item);
+            groups.set(signature, group);
+          }
+          for (const group of groups.values())
+            if (group.length >= 2)
+              for (const { node, card } of group) {
+                cardsByNode.set(node, card);
+                observedCards.push(card);
+              }
+        });
+      if (observedCards.length)
+        entity.facts["dom:cards"] = fact(
+          observedCards,
+          `${chosen.selector} repeated sibling containers with one heading link and a matching linked image; observed presentation only`,
+        );
+      const emittedLinks = new Set<string>();
+      const emittedCards = new Set<string>();
+      const emit = (block: ContentBlock, source: AnyNode) => {
+        if (entity.blocks.length >= 10000)
+          fail("OPERATOR_LIMIT", "DOM content exceeds 10000 blocks");
+        entity.blocks.push(block);
+        entity.evidence.push(evidence(locator(source)));
+      };
+      const emitLink = (node: Element) => {
+        const link = linkByNode.get(node);
+        if (!link || !link.label.trim()) return false;
+        const key = JSON.stringify([link.request_target, link.label.trim()]);
+        if (!emittedLinks.has(key)) {
+          emit(
+            {
+              type: "link",
+              text: link.label.trim(),
+              request_target: link.request_target,
+              ...(link.image_asset_sha256
+                ? {
+                    asset_sha256: link.image_asset_sha256,
+                    alt: link.label.trim(),
+                  }
+                : {}),
+            },
+            node,
+          );
+          emittedLinks.add(key);
+        }
+        return true;
+      };
+      const nestedMedia = (node: Element) => {
+        $(node)
+          .find("a[href],img")
+          .each((_i, child) => {
+            if (child.tagName === "a") {
+              if (
+                !emitLink(child) &&
+                /\.pdf(?:[?#]|$)/i.test($(child).attr("href") ?? "")
+              )
+                attachMedia(
+                  $(child).attr("href")!,
+                  $(child).text().trim(),
+                  locator(child),
+                );
+            } else if (
+              !$(child)
+                .parents("a")
+                .toArray()
+                .some((parent) => Boolean(linkByNode.get(parent)?.label.trim()))
+            )
+              attachMedia(
+                $(child).attr("src") ?? "",
+                $(child).attr("alt") ?? "",
+                locator(child),
+              );
+          });
+      };
+      const descendants = [
+        ...structuralTags,
+        ...atomicTags,
+        "img",
+        "a[href]",
+      ].join(",");
+      const walk = (element: Element, depth = 0) => {
+        if (depth > 200)
+          fail("OPERATOR_LIMIT", "DOM nesting exceeds 200 levels");
+        const node = $(element),
+          tag = element.tagName,
+          text = node.text().trim();
+        const card = cardsByNode.get(element);
+        if (card) {
+          const block: ContentBlock = {
+            type: "card",
+            text: card.label.trim(),
+            request_target: card.request_target,
+            items: card.items,
+            ...(card.image_asset_sha256
+              ? {
+                  asset_sha256: card.image_asset_sha256,
+                  alt: card.label.trim(),
+                }
+              : {}),
+          };
+          const key = JSON.stringify(block);
+          if (!emittedCards.has(key)) {
+            emit(block, element);
+            emittedCards.add(key);
+          }
+          return;
+        }
+        if (tag === "a" && emitLink(element)) return;
+        if (tag === "a" && /\.pdf(?:[?#]|$)/i.test(node.attr("href") ?? "")) {
+          attachMedia(node.attr("href")!, text, locator(element));
+          return;
+        }
+        if (tag === "img") {
+          attachMedia(
+            node.attr("src") ?? "",
+            node.attr("alt") ?? "",
+            locator(element),
+          );
+          return;
+        }
+        if (atomicTags.has(tag)) {
+          const links = node.find("a[href]").toArray();
+          if (
+            (/^h[1-6]$/.test(tag) || tag === "p") &&
+            links.length === 1 &&
+            linkByNode.has(links[0]) &&
+            text === node.find("a[href]").text().trim()
+          ) {
+            emitLink(links[0]);
+            return;
+          }
+          if (/^h[1-6]$/.test(tag) && text)
+            emit({ type: "heading", level: Number(tag[1]), text }, element);
+          else if (tag === "p" && text)
+            emit({ type: "paragraph", text }, element);
+          else if (tag === "blockquote" && text)
+            emit({ type: "quote", text }, element);
+          else if (tag === "ul" || tag === "ol")
+            emit(
+              {
+                type: "list",
+                items: node
+                  .children("li")
+                  .map((_i, item) => $(item).text().trim())
+                  .get(),
+              },
+              element,
+            );
+          else if (tag === "table")
+            emit(
+              {
+                type: "table",
+                rows: node
+                  .find("tr")
+                  .toArray()
+                  .filter((row) => $(row).closest("table").get(0) === element)
+                  .map((row) =>
+                    $(row)
+                      .children("th,td")
+                      .toArray()
+                      .map((cell) => $(cell).text().trim()),
+                  ),
+              },
+              element,
+            );
+          nestedMedia(element);
+          return;
+        }
+        let inline = "";
+        const flush = () => {
+          if (inline.trim())
+            emit({ type: "paragraph", text: inline.trim() }, element);
+          inline = "";
+        };
+        for (const child of element.children) {
+          if (child.type === "text") inline += child.data;
+          else if (isElement(child)) {
+            if (child.tagName === "br") inline += "\n";
+            else if (
+              !atomicTags.has(child.tagName) &&
+              !structuralTags.has(child.tagName) &&
+              child.tagName !== "img" &&
+              !(child.tagName === "a" && child.attribs.href) &&
+              !$(child).find(descendants).length
+            )
+              inline += $(child).text();
+            else {
+              flush();
+              walk(child, depth + 1);
+            }
+          }
+        }
+        flush();
+      };
+      walk(mainElement);
       main.find("a[href]").each((_index, node) => {
         const href = $(node).attr("href")!;
         try {
-          const target = identifyUrl(href, document.crawl_key);
+          const target = identifyUrl(href, documentBaseUrl);
           if (
             mediaExtension.test(target.raw_url) ||
             assets.has(target.crawl_key)
           )
             $(node).removeAttr("href");
-          else if (target.origin === sourceOrigin)
-            $(node).attr("href", target.request_target + target.fragment);
+          else if (linkByNode.has(node))
+            $(node).attr("href", linkByNode.get(node)!.request_target);
+          else if (!href.startsWith("#")) $(node).removeAttr("href");
         } catch {
           $(node).removeAttr("href");
         }

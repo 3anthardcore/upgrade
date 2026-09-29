@@ -58,7 +58,19 @@ const selected: SelectedDomObservation = {
 };
 const dom = `<!doctype html><html lang="ru"><head><title>Observed DOM title</title><meta name="description" content="Actual source description"><link rel="canonical" href="${domUrl}"><script type="application/ld+json">{"@context":"https://schema.org","@type":"Product","url":"${domUrl}","name":"Declared thermostat","sku":"000123","offers":[{"@type":"Offer","price":"3350","priceCurrency":"RUB","availability":"https://schema.org/InStock"},{"@type":"Offer","price":"2178","priceCurrency":"RUB"}],"exactLargeNumber":9007199254740993}</script></head><body><main><h1>Observed heading</h1><p>Точная цена 2 178 р.</p><ul><li>Один</li><li>Два</li></ul><table><tr><th>Цвет</th><td>белый</td></tr></table><blockquote>Observed quotation.</blockquote><img src="/pixel.png" srcset="/pixel.png 1x" alt="Thermostat" onerror="globalThis.operatorExtractionExecuted=true"><img src="/missing.jpg" alt="Unavailable"><a href="/missing.pdf">Instruction</a><a href="${origin}/account?a=1&a=2&empty=">Account</a><a href="javascript:alert(1)">Unsafe</a><form method="POST" action="/order"><input value="not content"><button name="add_to_cart">Order</button></form><iframe src="https://external.example/submit"></iframe><svg onload="alert(1)"><text>not content</text></svg><script>globalThis.operatorExtractionExecuted=true;fetch('/order',{method:'POST'})</script><p hidden>hidden price 0</p></main></body></html>`;
 
-async function fixture(customDom = dom, customSelected = selected) {
+const sourceCard = (
+  url: string,
+  title: string,
+  image = "/pixel.png",
+  extra = "",
+) =>
+  `<div class="untrusted-grid-column"><article class="old-framework-card"><a href="${url}"><img src="${image}" alt="${title}"></a><div><h3><a href="${url}">${title}</a></h3><p>Бренд: фактическая марка</p><div><span>3350 р.</span> <span>2178 р.</span></div><div>В наличии</div><p>Отзыв: «Точный текст»</p>${extra}<a href="${url}">Купить</a></div></article></div>`;
+
+async function fixture(
+  customDom = dom,
+  customSelected = selected,
+  domSource = domUrl,
+) {
   const directory = await mkdtemp(
     path.join(os.tmpdir(), "upgrade-operator-extract-"),
   );
@@ -83,7 +95,7 @@ async function fixture(customDom = dom, customSelected = selected) {
     inventory: {
       basis: "operator-observed-urls",
       urls: [
-        domUrl,
+        domSource,
         selectedUrl,
         `${origin}/unresolved-original`,
         `${origin}/a%2Fb`,
@@ -92,8 +104,8 @@ async function fixture(customDom = dom, customSelected = selected) {
     },
     observations: [
       {
-        source_url: domUrl,
-        document_url: domUrl,
+        source_url: domSource,
+        document_url: domSource,
         observed_at: "2026-09-29T06:58:00.000Z",
         format: "dom-html",
         file: ref("observations/dom.html", customDom),
@@ -109,7 +121,7 @@ async function fixture(customDom = dom, customSelected = selected) {
     assets: [
       {
         source_url: `${origin}/pixel.png`,
-        observed_on_urls: [domUrl, selectedUrl],
+        observed_on_urls: [domSource, selectedUrl],
         mime: "image/png",
         file: ref("assets/pixel.png", png),
       },
@@ -425,7 +437,8 @@ test("DOM extraction sanitizes active content, preserves typed visible content a
     );
     assert.equal(
       clean('a:contains("Account")').attr("href"),
-      "/account?a=1&a=2&empty=",
+      undefined,
+      "account actions remain inert source text",
     );
     assert.ok(!entity.sanitized_html.includes("hidden price 0"));
     assert.ok(
@@ -576,6 +589,404 @@ test("extractor reads accepted bytes again, not the cached selected-fields objec
       "0 р. injected cache value";
     const model = await extractOperatorContent(f.capture, { readFile: f.read });
     assert.equal(model.raw_selected_fields[1].text, "3350 р.");
+  } finally {
+    await f.close();
+  }
+});
+
+test("primary #content excludes page chrome, preserves inert form copy and loose DOM text in order", async () => {
+  const html = `<html><head><title>Homepage without H1</title><meta property="og:site_name" content="Фактическая марка"></head><body><header><p>GLOBAL HEADER</p></header><aside><article><h1>Sidebar product</h1></article></aside><div id="content" class="row col-md-9"><header><p>Article introduction</p></header><div>Lead <span>inline</span><br>next line</div><form action="/checkout" method="post"><div>3350 р. <span>2178 р.</span></div><p>В наличии</p><input value="private user input"><button>Order now</button></form><blockquote><p>One quotation</p></blockquote><table><tr><td><p>One cell</p></td></tr></table><p style="display:none !important">HIDDEN PRICE</p><p hidden>HIDDEN TEXT</p></div><footer><p>GLOBAL FOOTER</p></footer></body></html>`;
+  const f = await fixture(html);
+  try {
+    const model = await extractOperatorContent(f.capture, { readFile: f.read });
+    const entity = model.entities.find((item) => item.source_url === domUrl)!;
+    assert.equal(entity.facts["dom:primary_content"].value, "#content");
+    assert.equal(entity.title, "Homepage without H1");
+    assert.equal(entity.seo.h1, null);
+    assert.equal(entity.facts["dom:site_name"].value, "Фактическая марка");
+    assert.deepEqual(
+      entity.blocks.map((block) => block.type),
+      ["paragraph", "paragraph", "paragraph", "paragraph", "quote", "table"],
+    );
+    assert.deepEqual(
+      entity.blocks.slice(0, 4).map((block) => block.text),
+      [
+        "Article introduction",
+        "Lead inline\nnext line",
+        "3350 р. 2178 р.",
+        "В наличии",
+      ],
+    );
+    assert.doesNotMatch(
+      JSON.stringify(entity.blocks),
+      /GLOBAL|Sidebar|HIDDEN|private user input|Order now/,
+    );
+    assert.equal(entity.facts.price.status, "UNKNOWN");
+    assert.equal(entity.facts.availability.status, "UNKNOWN");
+    const clean = load(entity.sanitized_html);
+    assert.equal(clean("form,input,button,[class],[style]").length, 0);
+    assert.ok(
+      entity.evidence.some((item) => item.locator.startsWith("#content:")),
+    );
+    assert.equal(
+      model.source_capture.server_access_block_id,
+      "access-must-remain-active",
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("generic repeated sibling cards retain exact observed details and verified local image hashes without duplicate inner blocks", async () => {
+  const one = "/item?x=&x=1&x=2",
+    two = "/item?x=1&x=&x=2";
+  const html = `<html><head><title>Catalog</title></head><body><nav>Global navigation</nav><div id="content"><h1>Catalog</h1><section>${sourceCard(one, "Model A").replace('alt="Model A"', 'alt=""')}${sourceCard(two, "Model B")}</section></div></body></html>`;
+  const f = await fixture(html);
+  try {
+    const before = JSON.stringify(f.capture),
+      model = await extractOperatorContent(f.capture, { readFile: f.read }),
+      entity = model.entities.find((item) => item.source_url === domUrl)!;
+    const cards = entity.blocks.filter((block) => block.type === "card");
+    assert.equal(cards.length, 2);
+    assert.deepEqual(
+      entity.blocks.map((block) => block.type),
+      ["heading", "card", "card"],
+    );
+    assert.deepEqual(
+      cards.map((block) => block.request_target),
+      [one, two],
+    );
+    assert.deepEqual(
+      cards.map((block) => block.text),
+      ["Model A", "Model B"],
+    );
+    assert.ok(cards.every((block) => block.asset_sha256 === digest(png)));
+    assert.deepEqual(cards[0].items, [
+      "Бренд: фактическая марка",
+      "3350 р. 2178 р.",
+      "В наличии",
+      "Отзыв: «Точный текст»",
+    ]);
+    assert.equal(entity.type, "Page");
+    assert.deepEqual(model.prices, []);
+    assert.deepEqual(model.offers, []);
+    const links = entity.facts["dom:links"].value as Array<{
+      request_target: string;
+      label: string;
+      image_source_url?: string;
+      image_asset_sha256?: string;
+    }>;
+    assert.equal(
+      links.length,
+      6,
+      "full observed link list keeps image/heading/CTA duplicates for evidence",
+    );
+    assert.equal(links[0].image_source_url, `${origin}/pixel.png`);
+    assert.equal(
+      links[0].label,
+      "",
+      "an image-only link without alt is never assigned an invented raw label",
+    );
+    assert.equal(links[0].image_asset_sha256, digest(png));
+    assert.equal(
+      entity.facts["dom:links"].evidence.snapshot_sha256,
+      f.capture.observations[0].file.sha256,
+    );
+    assert.equal(JSON.stringify(f.capture), before);
+    assert.deepEqual(model.source_inventory, f.capture.inventory);
+  } finally {
+    await f.close();
+  }
+});
+
+test("ambiguous or isolated card structure remains ordinary source blocks; missing card media gets no invented hash", async () => {
+  const html = `<html><head><title>Cards</title></head><body><main><section>${sourceCard("/one", "One", "/missing.jpg")}${sourceCard("/two", "Two", "/missing.jpg")}</section><section>${sourceCard("/single", "Single")}</section><section>${sourceCard("/ambiguous", "Ambiguous", "/pixel.png", '<h4><a href="/other">Other primary</a></h4>')}${sourceCard("/ambiguous-2", "Ambiguous2", "/pixel.png", '<h4><a href="/other-2">Other primary2</a></h4>')}</section></main></body></html>`;
+  const f = await fixture(html);
+  try {
+    const model = await extractOperatorContent(f.capture, { readFile: f.read }),
+      entity = model.entities.find((item) => item.source_url === domUrl)!;
+    const cards = entity.blocks.filter((block) => block.type === "card");
+    assert.deepEqual(
+      cards.map((block) => block.request_target),
+      ["/one", "/two"],
+    );
+    assert.ok(cards.every((block) => block.asset_sha256 === undefined));
+    assert.ok(
+      model.source_capture.missing_asset_urls.includes(`${origin}/missing.jpg`),
+    );
+    assert.ok(
+      entity.blocks.some(
+        (block) => block.type === "link" && block.request_target === "/single",
+      ),
+    );
+    assert.ok(
+      entity.blocks.some(
+        (block) =>
+          block.type === "link" && block.request_target === "/ambiguous",
+      ),
+    );
+    assert.ok(!entity.sanitized_html.includes("src="));
+  } finally {
+    await f.close();
+  }
+});
+
+test("target navigation keeps exact page identities and deduplicates labels while actions, fragments and external contacts stay inert", async () => {
+  const html = `<html><head><title>Navigation</title></head><body><main><a href="/A%2Fb.php?x=&amp;x=1&amp;x=2">Exact</a><a href="/A%2Fb.php?x=&amp;x=1&amp;x=2">Exact</a><a href="/A%2fb.php?x=&amp;x=1&amp;x=2">Exact</a><a href="/index.php?route=product/product&amp;product_id=1">Legacy page</a><a href="#reviews">Reviews anchor</a><a href="/index.php?route=checkout/cart">Cart</a><a href="/catalog?action=add">Action</a><a href="/catalog?token=secret">Token</a><a href="/catalog" onclick="submitOrder()">Handler</a><a href="/catalog" role="button">Button role</a><a href="https://other.example/page">Foreign</a><a href="tel:+1234567890">Telephone</a><a href="mailto:source@example.org">Email</a></main></body></html>`;
+  const f = await fixture(html);
+  try {
+    const model = await extractOperatorContent(f.capture, { readFile: f.read }),
+      entity = model.entities.find((item) => item.source_url === domUrl)!;
+    assert.deepEqual(
+      entity.blocks
+        .filter((block) => block.type === "link")
+        .map((block) => block.request_target),
+      [
+        "/A%2Fb.php?x=&x=1&x=2",
+        "/A%2fb.php?x=&x=1&x=2",
+        "/index.php?route=product/product&product_id=1",
+      ],
+    );
+    assert.equal((entity.facts["dom:links"].value as unknown[]).length, 4);
+    const clean = load(entity.sanitized_html);
+    assert.equal(clean("a[href]").length, 5);
+    for (const label of [
+      "Cart",
+      "Action",
+      "Token",
+      "Handler",
+      "Button role",
+      "Foreign",
+      "Telephone",
+      "Email",
+    ])
+      assert.equal(
+        clean(`a:contains("${label}")`).attr("href"),
+        undefined,
+        label,
+      );
+    assert.ok(entity.blocks.some((block) => block.text === "Telephone"));
+  } finally {
+    await f.close();
+  }
+});
+
+test("brand is observed only from unambiguous og site metadata, never guessed from logo or page title", async () => {
+  const f = await fixture(
+    '<html><head><title>Invent no brand</title><meta property="og:site_name" content="One"><meta property="og:site_name" content="Two"></head><body><main><img src="/pixel.png" alt="Not a brand contract"><p>Content</p></main></body></html>',
+  );
+  try {
+    const model = await extractOperatorContent(f.capture, { readFile: f.read });
+    assert.equal(
+      model.entities.find((item) => item.source_url === domUrl)!.facts[
+        "dom:site_name"
+      ],
+      undefined,
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("deep untrusted DOM fails bounded extraction instead of recursively flattening without limit", async () => {
+  const f = await fixture(
+    `<html><head><title>Deep</title></head><body><main>${"<div>".repeat(205)}Observed text${"</div>".repeat(205)}</main></body></html>`,
+  );
+  try {
+    await assert.rejects(
+      () => extractOperatorContent(f.capture, { readFile: f.read }),
+      { code: "OPERATOR_LIMIT" },
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("homepage logo alt is an explicit bounded source fact only when a header root link image matches og:image", async () => {
+  for (const [region, meta, target, expected] of [
+    ["header", "/pixel.png", "/", true],
+    ["div", "/pixel.png", "/", false],
+    ["header", "https://other.example/pixel.png", "/", false],
+    ["header", "/pixel.png", "/catalog", false],
+  ]) {
+    const html = `<html><head><title>Homepage</title><meta property="og:image" content="${meta}"></head><body><${region}><a href="${target}"><img src="/pixel.png" alt="Точное исходное имя"></a></${region}><div id="content"><p>Home content</p></div></body></html>`;
+    const f = await fixture(html, selected, origin + "/");
+    try {
+      const model = await extractOperatorContent(f.capture, {
+          readFile: f.read,
+        }),
+        entity = model.entities.find(
+          (item) => item.source_url === origin + "/",
+        )!;
+      assert.equal(
+        entity.facts["dom:home_logo_alt"]?.value,
+        expected ? "Точное исходное имя" : undefined,
+      );
+      if (expected)
+        assert.equal(
+          entity.facts["dom:home_logo_alt"].evidence.snapshot_sha256,
+          f.capture.observations[0].file.sha256,
+        );
+      assert.equal(entity.facts["dom:site_name"], undefined);
+    } finally {
+      await f.close();
+    }
+  }
+});
+
+test("card dedup removes only identical rendered payload and preserves complete raw card observations", async () => {
+  const original = sourceCard("/one", "One");
+  const f = await fixture(
+    `<main><section>${original}${original}${sourceCard("/one", "One", "/missing.jpg")}</section></main>`,
+  );
+  try {
+    const model = await extractOperatorContent(f.capture, { readFile: f.read });
+    const entity = model.entities.find((item) => item.source_url === domUrl)!;
+    const cards = entity.blocks.filter((block) => block.type === "card");
+    assert.equal(cards.length, 2);
+    assert.equal(cards[0].asset_sha256, digest(png));
+    assert.equal(cards[1].asset_sha256, undefined);
+    assert.equal((entity.facts["dom:cards"].value as unknown[]).length, 3);
+    assert.deepEqual(cards[0].items, cards[1].items);
+  } finally {
+    await f.close();
+  }
+});
+
+test("homepage primary navigation retains exact safe observed pairs with snapshot evidence only on the homepage", async () => {
+  const html = `<html><head><title>Navigation</title></head><body><header><nav>
+    <a href="/catalog?x=1&amp;x=2&amp;empty="> Каталог </a>
+    <a href="/catalog?x=1&amp;x=2&amp;empty="> Каталог </a>
+    <a href="/contact">Контакты<script>ignored()</script><span hidden>Hidden</span></a>
+    <a href="/cart/add">Cart</a><a href="/safe" onclick="action()">Action</a>
+    <a href="https://foreign.example/catalog">Foreign</a><a href="tel:123">Phone</a>
+    <a href="#menu">Anchor</a><a href="/hidden" style="display:none">Hidden</a>
+    <span hidden><a href="/hidden-parent">Hidden parent</a></span>
+    <a href="/empty"><img src="/pixel.png" alt="Image only"></a>
+    </nav></header><div role="banner"><nav><a href="/news">Новости</a></nav></div>
+    <nav><a href="/outside-header">Outside header</a></nav><main><h1>Content</h1></main></body></html>`;
+  for (const url of [origin + "/", domUrl]) {
+    const f = await fixture(html, selected, url);
+    try {
+      const model = await extractOperatorContent(f.capture, {
+        readFile: f.read,
+      });
+      const entity = model.entities.find((item) => item.source_url === url)!;
+      const navigation = entity.facts["dom:primary_navigation"];
+      if (url === origin + "/") {
+        assert.deepEqual(navigation.value, [
+          { label: " Каталог ", request_target: "/catalog?x=1&x=2&empty=" },
+          { label: "Контакты", request_target: "/contact" },
+          { label: "Новости", request_target: "/news" },
+        ]);
+        assert.equal(
+          navigation.evidence.snapshot_sha256,
+          f.capture.observations[0].file.sha256,
+        );
+        assert.equal(navigation.evidence.source_url, url);
+      } else assert.equal(navigation, undefined);
+      assert.equal(
+        model.source_capture.server_access_block_id,
+        "access-must-remain-active",
+      );
+      assert.equal(model.source_capture.state, "PARTIAL");
+    } finally {
+      await f.close();
+    }
+  }
+});
+
+test("DOM base resolves relative page and media URLs without converting an external base into local content", async () => {
+  for (const external of [false, true]) {
+    const base = external ? "https://external.example/" : origin + "/";
+    const f = await fixture(
+      `<html><head><title>Base</title><base href="${base}"></head><body><main><a href="catalog?x=&amp;x=1&amp;x=2">Relative page</a><img src="pixel.png" alt="Relative image"></main></body></html>`,
+    );
+    try {
+      const model = await extractOperatorContent(f.capture, {
+          readFile: f.read,
+        }),
+        entity = model.entities.find((item) => item.source_url === domUrl)!;
+      assert.equal(entity.facts["dom:base_href"].value, base);
+      assert.deepEqual(
+        entity.blocks
+          .filter((block) => block.type === "link")
+          .map((block) => block.request_target),
+        external ? [] : ["/catalog?x=&x=1&x=2"],
+      );
+      assert.equal(
+        entity.blocks.filter((block) => block.type === "image").length,
+        external ? 0 : 1,
+      );
+      if (!external)
+        assert.equal(
+          entity.blocks.find((block) => block.type === "image")!.asset_sha256,
+          digest(png),
+        );
+      else
+        assert.ok(
+          model.limitations.some((text) => text.includes("External DOM base")),
+        );
+    } finally {
+      await f.close();
+    }
+  }
+});
+
+test("blank image and anchor addresses never resolve to the HTML base as media or navigation", async () => {
+  const f = await fixture(
+    `<html><head><title>Observed adapter</title><base href="${origin}/"></head><body><main><h1>Adapter</h1><a href=""><img src="" alt="Observed missing thumbnail"></a><a href="  "><img src=" \t " alt="Whitespace source"></a><img alt="Absent source"><p>Actual adapter description</p></main></body></html>`,
+  );
+  try {
+    const model = await extractOperatorContent(f.capture, { readFile: f.read });
+    const entity = model.entities.find((item) => item.source_url === domUrl)!;
+    assert.ok(!entity.assets.includes(origin + "/"));
+    assert.ok(!model.assets.some((asset) => asset.source_url === origin + "/"));
+    assert.ok(!model.source_capture.missing_asset_urls.includes(origin + "/"));
+    assert.ok(
+      !entity.blocks.some(
+        (block) =>
+          block.type === "image" ||
+          block.type === "link" ||
+          block.type === "card",
+      ),
+    );
+    assert.deepEqual(entity.facts["dom:links"].value, []);
+    const missing = entity.facts["dom:missing_image_sources"];
+    const observed = missing.value as Array<{
+      raw_src: string | null;
+      alt: string;
+      locator: string;
+    }>;
+    assert.deepEqual(
+      observed.map((item) => [item.raw_src, item.alt]),
+      [
+        ["", "Observed missing thumbnail"],
+        [" \t ", "Whitespace source"],
+        [null, "Absent source"],
+      ],
+    );
+    assert.ok(
+      observed.every(
+        (item) =>
+          item.locator.includes("img:nth-of-type") &&
+          item.locator.endsWith("@src"),
+      ),
+    );
+    assert.equal(
+      missing.evidence.snapshot_sha256,
+      f.capture.observations[0].file.sha256,
+    );
+    assert.equal(missing.evidence.source_url, domUrl);
+    assert.ok(
+      model.limitations.some(
+        (text) =>
+          text.includes("Missing source image address") &&
+          text.includes(domUrl),
+      ),
+    );
+    assert.match(JSON.stringify(entity.blocks), /Actual adapter description/);
+    assert.equal(model.source_capture.state, "PARTIAL");
   } finally {
     await f.close();
   }

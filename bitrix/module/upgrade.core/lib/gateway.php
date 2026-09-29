@@ -25,6 +25,13 @@ final class Gateway
     private function q(string $value): string { return "'".$this->db->getSqlHelper()->forSql($value)."'"; }
     private static function encode(mixed $value): string { return json_encode($value,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR); }
     private static function h(string $text): string { return htmlspecialchars($text,ENT_QUOTES|ENT_SUBSTITUTE,'UTF-8'); }
+    private static function contentLink(string $target): string
+    {
+        if (strlen($target)>8192 || !str_starts_with($target,'/') || str_starts_with($target,'//') || preg_match('/[\x00-\x20\x7f#\\\\]/',$target)) { throw new \RuntimeException('UNSAFE_CONTENT_LINK'); }
+        $path=explode('?',$target,2)[0];$decoded=rawurldecode($path);
+        if (preg_match('/%(?![a-fA-F0-9]{2})/',$path) || preg_match('/[\x00-\x1f\\\\]/',$decoded) || in_array('..',explode('/',$decoded),true) || in_array('.',explode('/',$decoded),true) || preg_match('~^/(bitrix|local|upload|\.well-known)(/|$)~i',$decoded) || $decoded==='/robots.txt') { throw new \RuntimeException('UNSAFE_CONTENT_LINK'); }
+        return self::h($target);
+    }
     public function claim(string $owner, int $ttl=300): array
     {
         if (!preg_match('/^[a-zA-Z0-9_.-]{1,128}$/',$owner) || $ttl<30 || $ttl>3600) { throw new \RuntimeException('INVALID_OWNER_OR_TTL'); }
@@ -57,8 +64,10 @@ final class Gateway
     }
     private function fields(array $entity): array
     {
-        $html=[];
+        $html=[];$cardGroup=false;
         foreach ($entity['blocks'] as $block) {
+            if ($block['type']==='card' && !$cardGroup) { $html[]='<div class="catalog-grid">';$cardGroup=true; }
+            if ($block['type']!=='card' && $cardGroup) { $html[]='</div>';$cardGroup=false; }
             $text=self::h((string)($block['text']??''));
             switch ($block['type']) {
                 case 'paragraph': $html[]='<p>'.$text.'</p>'; break;
@@ -74,9 +83,25 @@ final class Gateway
                     $asset=$this->assetIndex[$block['asset_sha256']]??null;
                     if (!$asset||$asset['mime']!=='application/pdf') { throw new \RuntimeException('DOCUMENT_ASSET_MISSING'); }
                     $html[]='<p><a href="'.self::h($asset['public_path']).'" download>'.($text?:'Скачать документ').'</a></p>'; break;
+                case 'link':
+                case 'card':
+                    $href=self::contentLink((string)($block['request_target']??''));$image='';
+                    if (isset($block['asset_sha256'])) {
+                        $asset=$this->assetIndex[$block['asset_sha256']]??null;
+                        if (!$asset || !str_starts_with($asset['mime'],'image/')) { throw new \RuntimeException('CONTENT_LINK_IMAGE_MISSING'); }
+                        $image='<img loading="lazy" src="'.self::h($asset['public_path']).'" alt="'.self::h((string)($block['alt']??'')).'">';
+                    }
+                    if ($block['type']==='card') {
+                        $items=implode('',array_map(static fn($item)=>'<p>'.self::h((string)$item).'</p>',$block['items']??[]));
+                        $html[]='<article class="catalog-card"><a class="card-image" aria-label="'.$text.'" href="'.$href.'">'.($image?:'<span class="no-image">Нет изображения в снимке</span>').'</a><div class="card-content"><h3><a href="'.$href.'">'.$text.'</a></h3><div class="card-facts">'.$items.'</div><a class="card-open" href="'.$href.'">Открыть карточку <span aria-hidden="true">↗</span></a></div></article>';
+                    } else {
+                        $html[]='<a class="content-link'.($image?' content-link-media':'').'" href="'.$href.'">'.$image.'<span>'.$text.'</span></a>';
+                    }
+                    break;
                 default: throw new \RuntimeException('UNSUPPORTED_CONTENT_BLOCK');
             }
         }
+        if ($cardGroup) { $html[]='</div>'; }
         $seo=$entity['seo']??[];
         return ['NAME'=>$entity['title'],'DETAIL_TEXT'=>implode("\n",$html),'DETAIL_TEXT_TYPE'=>'html','PREVIEW_TEXT'=>(string)($entity['description']??''),'PREVIEW_TEXT_TYPE'=>'text','properties'=>['UG_SEO_TITLE'=>(string)($seo['title']??$entity['title']),'UG_DESCRIPTION'=>(string)($seo['description']??$entity['description']??''),'UG_H1'=>(string)($seo['h1']??$entity['title']),'UG_FACTS'=>self::encode($entity['facts']??[])]];
     }

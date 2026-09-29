@@ -75,8 +75,8 @@ export async function main(argv = process.argv.slice(2)) {
         "task create|claim|heartbeat|submit|review",
         "artifact add --project ID --file FILE --type TYPE",
         "operator-capture ingest --project ID --directory PATH --manifest-sha256 SHA256",
-        "operator model --project ID --capture ID --manifest-sha256 SHA256 [--page URL]",
-        "operator build --project ID --capture ID --manifest-sha256 SHA256 --model MODEL_ID",
+        "operator model --project ID --capture ID --manifest-sha256 SHA256 [--page URL | --all-observed]",
+        "operator build --project ID --capture ID --manifest-sha256 SHA256 --model MODEL_ID [--all-observed]",
         "crawl|extract|build|verify|report|package --project ID",
         "crawl|run --project ID --ack-access-block BLOCK_ID --access-resolution-reason TEXT",
         "import --project ID --dry-run",
@@ -282,12 +282,17 @@ export async function main(argv = process.argv.slice(2)) {
         });
         break;
       case "operator": {
+        if (f["all-observed"] !== undefined && f["all-observed"] !== true)
+          throw new UpgradeError(
+            "--all-observed is an explicit flag without a value",
+          );
         const { createOperatorModel, buildOperatorPackage } =
           await import("../core/operator-model.ts");
         const options = {
           captureId: text("capture", true)!,
           manifestSha256: text("manifest-sha256", true)!,
           page: text("page"),
+          allObserved: f["all-observed"] === true,
         };
         if (sub === "model") value = await createOperatorModel(store, options);
         else if (sub === "build")

@@ -56,8 +56,13 @@ final class Package
             if (!in_array($entity['type'],['page','home','service','article','contact','contacts','category','search','not-found','product','section'],true)) { throw new \RuntimeException('ENTITY_TYPE_UNSUPPORTED'); }
             if (mb_strlen($entity['title'])>255 || !is_array($entity['blocks']??null)) { throw new \RuntimeException('ENTITY_FIELDS_INVALID'); }
             foreach ($entity['blocks'] as $block) {
-                if (!is_array($block)||!in_array($block['type']??'',['paragraph','heading','list','table','quote','image','document'],true)) { throw new \RuntimeException('CONTENT_BLOCK_UNSUPPORTED'); }
+                if (!is_array($block)||!in_array($block['type']??'',['paragraph','heading','list','table','quote','image','document','link','card'],true)) { throw new \RuntimeException('CONTENT_BLOCK_UNSUPPORTED'); }
                 if (in_array($block['type'],['image','document'],true)&&!isset($assetHashes[$block['asset_sha256']??''])) { throw new \RuntimeException('CONTENT_ASSET_MISSING'); }
+                if (in_array($block['type'],['link','card'],true)) {
+                    self::target((string)($block['request_target']??''));
+                    if (isset($block['asset_sha256']) && (!isset($assetHashes[$block['asset_sha256']]) || !str_starts_with($assetHashes[$block['asset_sha256']]['mime'],'image/'))) { throw new \RuntimeException('CONTENT_LINK_IMAGE_MISSING'); }
+                    if (isset($block['items']) && (!is_array($block['items']) || count(array_filter($block['items'],'is_string'))!==count($block['items']))) { throw new \RuntimeException('CONTENT_CARD_ITEMS_INVALID'); }
+                }
             }
             $keys[$key]=true; $ids[$entity['source_id']]=true;
         }

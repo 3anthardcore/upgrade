@@ -347,6 +347,8 @@ export async function buildBitrixPackage(
             "quote",
             "image",
             "document",
+            "link",
+            "card",
           ].includes(String((block as { type?: unknown }).type)),
       )
     )
@@ -354,7 +356,17 @@ export async function buildBitrixPackage(
     for (const block of blocks as Array<{
       type: string;
       asset_sha256?: string;
+      request_target?: string;
+      items?: unknown;
     }>) {
+      if (["link", "card"].includes(block.type)) {
+        try { validateRequestTarget(block.request_target ?? ""); }
+        catch { blockers.add("UNSAFE_CONTENT_LINK"); }
+        if (block.asset_sha256 && !assetRecords.some((item) => item.sha256 === block.asset_sha256 && item.mime.startsWith("image/")))
+          blockers.add("BLOCK_LINK_IMAGE_MISSING");
+        if (block.items !== undefined && block.items !== null && (!Array.isArray(block.items) || block.items.some((item) => typeof item !== "string")))
+          blockers.add("CONTENT_CARD_ITEMS_INVALID");
+      }
       if (
         ["image", "document"].includes(block.type) &&
         !assetRecords.some((item) => item.sha256 === block.asset_sha256)
@@ -443,6 +455,27 @@ export async function buildBitrixPackage(
     files[path] = asset.hash;
   }
   await add("data/design-tokens.json", json(tokens));
+  // A homepage logo's observed alt label may name the site; never guess from an arbitrary image.
+  const home = input.entities.find((entity) => entity.source_url === input.sourceOrigin + "/");
+  const homeFacts = home?.facts as Record<string, { value?: unknown }> | undefined;
+  const observedBrand = homeFacts?.["dom:home_logo_alt"]?.value;
+  const brand = typeof observedBrand === "string" && observedBrand.trim().length > 0 && observedBrand.length <= 160
+    ? observedBrand : "Обновлённый сайт";
+  const escapedBrand = brand.replace(/[&<>"']/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[char]!);
+  const observedNavigation = homeFacts?.["dom:primary_navigation"]?.value;
+  const mappedTargets = new Set(routes.filter(route => route.expected_status === 200).map(route => route.request_target));
+  const escapeHtml = (value: string) => value.replace(/[&<>"']/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[char]!);
+  const navigation: string[] = [];
+  const seenNavigation = new Set<string>();
+  if (Array.isArray(observedNavigation)) for (const item of observedNavigation) {
+    if (!item || typeof item.label !== "string" || typeof item.request_target !== "string" || !item.label.trim() || item.label.length > 240) continue;
+    try { validateRequestTarget(item.request_target); } catch { continue; }
+    if (!mappedTargets.has(item.request_target)) continue;
+    const key = JSON.stringify([item.label, item.request_target]);
+    if (seenNavigation.has(key)) continue;
+    seenNavigation.add(key);
+    navigation.push(`<a href="${escapeHtml(item.request_target)}">${escapeHtml(item.label.trim())}</a>`);
+  }
   const sourceRoot = resolve(
     dirname(fileURLToPath(import.meta.url)),
     "../../bitrix",
@@ -459,6 +492,9 @@ export async function buildBitrixPackage(
           name,
           name === "code/local/templates/upgrade/styles.css"
             ? bytes.toString("utf8") + tokenCss
+            : name === "code/local/templates/upgrade/header.php"
+              ? bytes.toString("utf8").replace(/<!-- upgrade:brand-name -->.*?<!-- \/upgrade:brand-name -->/, () => escapedBrand)
+                .replace(/<!-- upgrade:primary-navigation -->.*?<!-- \/upgrade:primary-navigation -->/s, match => navigation.length ? navigation.join("") : match)
             : bytes,
         );
       }

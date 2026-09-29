@@ -80,6 +80,33 @@ function operatorDerivedEvidence(
   const models: any[] = [],
     builds: any[] = [];
   const modelRecords = store.list<any>("operator_model");
+  const selectionFor = (binding: any): string[] => {
+    if (
+      binding?.schema_version === 1 &&
+      typeof binding.selected_source_url === "string" &&
+      !Object.hasOwn(binding, "selected_source_urls") &&
+      !Object.hasOwn(binding, "selection_mode")
+    )
+      return [binding.selected_source_url];
+    requireEvidence(
+      binding?.schema_version === 2 &&
+        binding.selection_mode === "ALL_OBSERVED" &&
+        !Object.hasOwn(binding, "selected_source_url") &&
+        Array.isArray(binding.selected_source_urls) &&
+        binding.selected_source_urls.length > 0 &&
+        binding.selected_source_urls.length <= 1000 &&
+        binding.selected_source_urls.every(
+          (url: unknown) =>
+            typeof url === "string" && identifyUrl(url).crawl_key === url,
+        ) &&
+        same(
+          binding.selected_source_urls,
+          [...new Set(binding.selected_source_urls)].sort(),
+        ),
+      "Derived selection binding is invalid",
+    );
+    return binding.selected_source_urls;
+  };
   const validateBinding = (record: any) => {
     const binding = record.operator_binding;
     const capture = operator.captures.find(
@@ -92,7 +119,7 @@ function operatorDerivedEvidence(
       "Derived output requires a fully verified COMMITTED capture",
     );
     requireEvidence(
-      binding?.schema_version === 1 &&
+      [1, 2].includes(binding?.schema_version) &&
         binding.project_id === project.project_id &&
         binding.capture_id === capture.capture_id &&
         binding.manifest_sha256 === capture.manifest_sha256 &&
@@ -116,15 +143,36 @@ function operatorDerivedEvidence(
       "Derived original source SHA mismatch",
     );
     requireEvidence(
-      operator.registry.urls.some(
-        (row) =>
-          row.crawl_key === binding.selected_source_url &&
-          row.observations.some(
-            (observation) => observation.capture_id === capture.capture_id,
-          ),
+      selectionFor(binding).every((url) =>
+        operator.registry.urls.some(
+          (row) =>
+            row.crawl_key === url &&
+            row.observations.some(
+              (observation) => observation.capture_id === capture.capture_id,
+            ),
+        ),
       ),
       "Derived selected URL has no verified operator observation",
     );
+    if (binding.schema_version === 2) {
+      const captureResult = JSON.parse(
+        evidenceBytes(store, capture.result_artifact_id).bytes.toString("utf8"),
+      );
+      requireEvidence(
+        same(
+          binding.selected_source_urls,
+          [
+            ...new Set(
+              captureResult.observations.map(
+                (observation: any) =>
+                  identifyUrl(observation.source_url).crawl_key,
+              ),
+            ),
+          ].sort(),
+        ),
+        "ALL_OBSERVED must select every captured source page",
+      );
+    }
     requireEvidence(
       record.id === record.input_hash &&
         /^[a-f0-9]{64}$/.test(record.input_hash) &&
@@ -177,7 +225,9 @@ function operatorDerivedEvidence(
         record.input_hash ===
           hash(
             JSON.stringify([
-              "operator-model-v1",
+              record.operator_binding.schema_version === 1
+                ? "operator-model-v1"
+                : "operator-model-v2",
               record.operator_binding,
               record.code_sha256,
             ]),
@@ -225,33 +275,40 @@ function operatorDerivedEvidence(
       const captureResult = JSON.parse(
         evidenceBytes(store, capture.result_artifact_id).bytes.toString("utf8"),
       );
+      const selection = selectionFor(record.operator_binding);
       requireEvidence(
         same(scope.inventory, captureResult.inventory) &&
           same(scope.coverage, captureResult.coverage) &&
           scope.known_url_count === captureResult.inventory.length &&
           scope.planned_route_count === routes.routes.length &&
-          scope.selected_url_count === 1 &&
+          scope.selected_url_count === selection.length &&
           scope.unresolved_url_count ===
             scope.known_url_count - routes.routes.length &&
-          same(scope.selected_source_urls, [
-            record.operator_binding.selected_source_url,
-          ]),
+          same(scope.selected_source_urls, selection),
         "Operator model scope denominator mismatch",
       );
       requireEvidence(
-        model.entities.length === 1 &&
-          model.entities.every(
-            (entity: any) =>
-              identifyUrl(entity.source_url).crawl_key ===
-              record.operator_binding.selected_source_url,
+        model.entities.length === selection.length &&
+          same(
+            model.entities
+              .map((entity: any) => identifyUrl(entity.source_url).crawl_key)
+              .sort(),
+            selection.slice().sort(),
           ) &&
-          routes.routes.length <= 1 &&
+          routes.routes.length <= selection.length &&
+          new Set(routes.routes.map((route: any) => route.request_target))
+            .size === routes.routes.length &&
           routes.routes.every(
             (route: any) =>
-              route.source_origin + route.request_target ===
-                record.operator_binding.selected_source_url &&
+              selection.includes(route.source_origin + route.request_target) &&
               route.target_route === route.request_target &&
-              route.query_policy === "preserve-exact",
+              route.query_policy === "preserve-exact" &&
+              model.entities.some(
+                (entity: any) =>
+                  entity.source_id === route.entity_source_id &&
+                  identifyUrl(entity.source_url).crawl_key ===
+                    route.source_origin + route.request_target,
+              ),
           ),
         "Operator model route selection mismatch",
       );
@@ -260,6 +317,11 @@ function operatorDerivedEvidence(
         integrity: "VERIFIED",
         stale_binding: capture.stale_binding,
         selected_source_url: record.operator_binding.selected_source_url,
+        selected_source_urls: selection,
+        selection_mode:
+          record.operator_binding.schema_version === 1
+            ? "SINGLE_PAGE"
+            : "ALL_OBSERVED",
         entities: model.entities.length,
         known_urls: scope.known_url_count,
         planned_routes: routes.routes.length,
@@ -312,7 +374,9 @@ function operatorDerivedEvidence(
         record.input_hash ===
           hash(
             JSON.stringify([
-              "operator-build-v1",
+              record.operator_binding.schema_version === 1
+                ? "operator-build-v1"
+                : "operator-build-v2",
               modelRecord.id,
               modelRecord.output_sha256,
               record.code_sha256,
@@ -415,6 +479,8 @@ function operatorDerivedEvidence(
         planned_routes: modelInfo.planned_routes,
         known_urls: modelInfo.known_urls,
         unresolved_urls: modelInfo.unresolved_urls,
+        selected_source_urls: modelInfo.selected_source_urls,
+        selection_mode: modelInfo.selection_mode,
         runtime_verification: "NOT_RUN",
         result_artifact_id: record.result_artifact_id,
       });
@@ -977,7 +1043,7 @@ export function writeReport(store: Store) {
     .filter((build) => build.state === "PARTIAL")
     .at(-1);
   const contentNote = partialModel
-    ? `Модель автоматического обхода: ${entities} сущностей. Отдельная проверенная операторская модель: ${partialModel.entities} сущность, ${partialModel.planned_routes} запланированных маршрутов из ${partialModel.known_urls} известных URL. Остальные URL не считаются перенесёнными; размер всего каталога неизвестен.`
+    ? `Модель автоматического обхода: ${entities} сущностей. Отдельная проверенная операторская модель: сущностей — ${partialModel.entities}, запланированных маршрутов — ${partialModel.planned_routes} из ${partialModel.known_urls} известных URL. Остальные URL не считаются перенесёнными; размер всего каталога неизвестен.`
     : normalContentNote;
   const headline = accessBlocked
     ? "NOT_READY — автоматический доступ к источнику ограничен"
@@ -1007,11 +1073,11 @@ export function writeReport(store: Store) {
         : operatorDerived.latest_verified_build_id
           ? partialBuild?.package_blockers.length
             ? "Устранить блокеры частичного операторского пакета и собрать новую принятую версию. Импорт заблокирован; отсутствующие файлы и неохваченные URL не считаются перенесёнными."
-            : "Проверить изолированный импорт частичного операторского пакета и его один выбранный маршрут; остальные известные URL остаются неохваченными."
+            : `Проверить изолированный импорт частичного операторского пакета и выбранные маршруты (${partialBuild?.planned_routes ?? 0}); остальные известные URL остаются неохваченными.`
           : partialModel
             ? "Собрать отдельный частичный пакет из проверенной операторской модели, сохранив неохваченные URL в scope."
             : operator.valid_captures
-              ? "Извлечь отдельную частичную модель выбранного URL из принятого операторского capture и продолжать пополнение наблюдений."
+              ? "Извлечь отдельную частичную модель явно выбранной страницы или всех наблюдавшихся страниц из принятого операторского capture и продолжать пополнение наблюдений."
               : "";
   const nextStep = operatorNextStep
     ? `${operatorNextStep} ${sourceNextStep}`

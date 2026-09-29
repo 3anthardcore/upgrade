@@ -38,8 +38,7 @@ import {
 } from "../bitrix-adapter/index.ts";
 import type { PackageManifest } from "../bitrix-adapter/index.ts";
 
-export interface OperatorBinding {
-  schema_version: 1;
+interface OperatorBindingBase {
   project_id: string;
   capture_id: string;
   manifest_sha256: string;
@@ -48,8 +47,16 @@ export interface OperatorBinding {
   source_artifact_id: string | null;
   source_artifact_sha256: string | null;
   server_access_block_id: string | null;
-  selected_source_url: string;
 }
+export type OperatorBinding = OperatorBindingBase &
+  (
+    | { schema_version: 1; selected_source_url: string }
+    | {
+        schema_version: 2;
+        selection_mode: "ALL_OBSERVED";
+        selected_source_urls: string[];
+      }
+  );
 export interface OperatorModelRecord {
   id: string;
   state: "PENDING" | "COMMITTED";
@@ -83,6 +90,7 @@ export interface OperatorOptions {
   captureId: string;
   manifestSha256: string;
   page?: string;
+  allObserved?: boolean;
 }
 type AcceptedCapture = ValidatedOperatorCapture & {
   source_artifact_id: string | null;
@@ -132,6 +140,37 @@ const BUILD_CODE = [
   "bitrix",
   "package-lock.json",
 ];
+function selectedUrls(binding: OperatorBinding): string[] {
+  if (
+    binding.schema_version === 1 &&
+    typeof binding.selected_source_url === "string" &&
+    !Object.hasOwn(binding, "selected_source_urls") &&
+    !Object.hasOwn(binding, "selection_mode")
+  )
+    return [binding.selected_source_url];
+  if (
+    binding.schema_version === 2 &&
+    binding.selection_mode === "ALL_OBSERVED" &&
+    !Object.hasOwn(binding, "selected_source_url") &&
+    Array.isArray(binding.selected_source_urls) &&
+    binding.selected_source_urls.length > 0 &&
+    binding.selected_source_urls.length <=
+      OPERATOR_CAPTURE_LIMITS.observations &&
+    binding.selected_source_urls.every(
+      (url) => typeof url === "string" && identifyUrl(url).crawl_key === url,
+    ) &&
+    equal(
+      binding.selected_source_urls,
+      [...new Set(binding.selected_source_urls)].sort(),
+    )
+  )
+    return binding.selected_source_urls;
+  return fail("Invalid operator selection binding");
+}
+const modelDomain = (binding: OperatorBinding) =>
+  binding.schema_version === 1 ? "operator-model-v1" : "operator-model-v2";
+const buildDomain = (binding: OperatorBinding) =>
+  binding.schema_version === 1 ? "operator-build-v1" : "operator-build-v2";
 async function verification<T>(operation: () => Promise<T>): Promise<T> {
   try {
     return await operation();
@@ -214,6 +253,12 @@ function artifactJson<T>(
 }
 
 function loadCapture(store: Store, options: OperatorOptions) {
+  if (
+    (options.allObserved !== undefined &&
+      typeof options.allObserved !== "boolean") ||
+    (options.allObserved && options.page)
+  )
+    throw new UpgradeError("Choose either --all-observed or --page, not both");
   if (
     !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(options.captureId) ||
     !/^[a-f0-9]{64}$/.test(options.manifestSha256)
@@ -335,12 +380,14 @@ function loadCapture(store: Store, options: OperatorOptions) {
     : observed.length === 1
       ? observed[0]
       : undefined;
-  if (!chosen || !observed.includes(chosen))
+  if (
+    (!options.allObserved && (!chosen || !observed.includes(chosen))) ||
+    !observed.length
+  )
     throw new UpgradeError(
-      "Choose exactly one captured page with --page ABSOLUTE_URL",
+      "Choose one captured page with --page ABSOLUTE_URL or explicitly select --all-observed",
     );
-  const binding: OperatorBinding = {
-    schema_version: 1,
+  const bindingBase: OperatorBindingBase = {
     project_id: project.project_id,
     capture_id: receipt.capture_id,
     manifest_sha256: receipt.manifest_sha256,
@@ -349,8 +396,15 @@ function loadCapture(store: Store, options: OperatorOptions) {
     source_artifact_id: receipt.source_artifact_id,
     source_artifact_sha256: sourceHash,
     server_access_block_id: receipt.server_access_block_id,
-    selected_source_url: chosen,
   };
+  const binding: OperatorBinding = options.allObserved
+    ? {
+        schema_version: 2,
+        ...bindingBase,
+        selection_mode: "ALL_OBSERVED",
+        selected_source_urls: observed.sort(),
+      }
+    : { schema_version: 1, ...bindingBase, selected_source_url: chosen! };
   return { project, receipt, capture, binding, readFile };
 }
 
@@ -360,6 +414,7 @@ function planOperatorRoutes(
   binding: OperatorBinding,
   inputHash: string,
 ): RoutesArtifact {
+  const selected = new Set(selectedUrls(binding));
   const manifest: RoutesArtifact = {
     schema_version: 1,
     project_id: model.project_id,
@@ -371,7 +426,9 @@ function planOperatorRoutes(
     conflicts: [],
     origin_map: { [capture.source_origin]: "https://demo.invalid" },
     limitations: [
-      "Only an explicitly selected operator observation is mapped. Source HTTP status, redirects and server access remain unverified.",
+      binding.schema_version === 1
+        ? "Only an explicitly selected operator observation is mapped. Source HTTP status, redirects and server access remain unverified."
+        : "All captured source-page observations are explicitly selected. Unobserved inventory URLs remain unresolved; source HTTP status and server access remain unverified.",
       "Target HTTP 200 is a planned partial-page response, not an observed source status. Query order and repeated/empty parameters are preserved exactly.",
     ],
     operator_binding: binding,
@@ -380,7 +437,7 @@ function planOperatorRoutes(
     full_source_denominator: "UNKNOWN",
   };
   for (const entry of capture.inventory) {
-    if (entry.crawl_key !== binding.selected_source_url) {
+    if (!selected.has(entry.crawl_key)) {
       manifest.unresolved.push({
         source_url: entry.crawl_key,
         reason:
@@ -497,6 +554,7 @@ function assertModelIntent(
   id: string,
   currentCodeHash?: string,
 ) {
+  selectedUrls(binding);
   if (
     !record ||
     !["PENDING", "COMMITTED"].includes(record.state) ||
@@ -506,7 +564,7 @@ function assertModelIntent(
     (currentCodeHash !== undefined && record.code_sha256 !== currentCodeHash) ||
     id !==
       hash(
-        JSON.stringify(["operator-model-v1", binding, record.code_sha256]),
+        JSON.stringify([modelDomain(binding), binding, record.code_sha256]),
       ) ||
     !equal(record.operator_binding, binding) ||
     record.capture_id !== binding.capture_id ||
@@ -576,7 +634,7 @@ export async function createOperatorModel(
         const input = loadCapture(store, options);
         const codeHash = sourceFingerprint(MODEL_CODE);
         const inputHash = hash(
-          JSON.stringify(["operator-model-v1", input.binding, codeHash]),
+          JSON.stringify([modelDomain(input.binding), input.binding, codeHash]),
         );
         const prior = existingRecord<OperatorModelRecord>(
           store,
@@ -606,14 +664,21 @@ export async function createOperatorModel(
           return fail(
             "Extractor implementation changed during operator model execution",
           );
-        const selectedEntities = extracted.entities.filter(
-          (entity) =>
-            identifyUrl(entity.source_url).crawl_key ===
-            input.binding.selected_source_url,
+        const selection = selectedUrls(input.binding);
+        const selected = new Set(selection);
+        const selectedEntities = extracted.entities.filter((entity) =>
+          selected.has(identifyUrl(entity.source_url).crawl_key),
         );
-        if (selectedEntities.length !== 1)
+        if (
+          selectedEntities.length !== selection.length ||
+          new Set(
+            selectedEntities.map(
+              (entity) => identifyUrl(entity.source_url).crawl_key,
+            ),
+          ).size !== selection.length
+        )
           throw new UpgradeError(
-            "Exactly one supported observed entity is required for the selected partial page",
+            "Exactly one supported observed entity is required for every explicitly selected page",
             5,
           );
         const model: ModelArtifact = {
@@ -634,10 +699,8 @@ export async function createOperatorModel(
               (entity) => entity.source_id === price.product_source_id,
             ),
           ),
-          features: extracted.features.filter(
-            (feature) =>
-              identifyUrl(feature.source_url).crawl_key ===
-              input.binding.selected_source_url,
+          features: extracted.features.filter((feature) =>
+            selected.has(identifyUrl(feature.source_url).crawl_key),
           ),
           operator_binding: input.binding,
           input_hash: inputHash,
@@ -662,9 +725,9 @@ export async function createOperatorModel(
           inventory: input.capture.inventory,
           urls: input.capture.inventory.map((entry) => entry.crawl_key),
           coverage: input.capture.coverage,
-          selected_source_urls: [input.binding.selected_source_url],
+          selected_source_urls: selection,
           known_url_count: input.capture.inventory.length,
-          selected_url_count: 1,
+          selected_url_count: selection.length,
           planned_route_count: routes.mapped_count,
           unresolved_url_count:
             input.capture.inventory.length - routes.mapped_count,
@@ -786,14 +849,16 @@ function addPartialBoundary(
     );
   const partialHeader = header.replace(
     marker,
-    `Частичный снимок по наблюдению оператора · 1 из ${known} известных URL · Полнота источника не установлена`,
+    `Частичный снимок по наблюдению оператора · ${selectedUrls(binding).length} из ${known} известных URL · Полнота источника не установлена`,
   );
   writeFileSync(join(directory, headerPath), partialHeader);
   manifest.files[headerPath] = hash(partialHeader);
   manifest.warnings = [
     ...new Set([
       ...manifest.warnings,
-      `PARTIAL_OPERATOR_CAPTURE:${binding.capture_id}:one-page-of-${known}-known-urls`,
+      binding.schema_version === 1
+        ? `PARTIAL_OPERATOR_CAPTURE:${binding.capture_id}:one-page-of-${known}-known-urls`
+        : `PARTIAL_OPERATOR_CAPTURE:${binding.capture_id}:${selectedUrls(binding).length}-observed-pages-of-${known}-known-urls`,
       "FULL_SOURCE_DENOMINATOR_UNKNOWN: unresolved URLs are not excluded or fabricated",
       "SOURCE_ACCESS_NOT_VERIFIED: source crawl access gate remains unchanged",
       "OPERATOR_TARGET_HTTP_200_PLANNED: source HTTP status, redirects and runtime behavior remain unverified",
@@ -818,9 +883,20 @@ export async function buildOperatorPackage(
         );
         if (record.state !== "COMMITTED")
           throw new UpgradeError("Operator model is not COMMITTED", 3);
+        if (
+          (record.operator_binding.schema_version === 2) !==
+          Boolean(options.allObserved)
+        )
+          throw new UpgradeError(
+            "Build selection must match the model: use --all-observed only for an ALL_OBSERVED model",
+          );
         const input = loadCapture(store, {
           ...options,
-          page: options.page ?? record.operator_binding.selected_source_url,
+          page:
+            options.page ??
+            (record.operator_binding.schema_version === 1
+              ? record.operator_binding.selected_source_url
+              : undefined),
         });
         assertModelIntent(record, input.binding, options.modelId);
         const model = artifactJson<ModelArtifact>(
@@ -841,19 +917,47 @@ export async function buildOperatorPackage(
         assertModelOutput(model, "model", record);
         assertModelOutput(routes, "routes", record);
         assertModelOutput(scope, "scope", record);
+        const selection = selectedUrls(input.binding);
         if (
-          model.value.entities.length !== 1 ||
-          routes.value.routes.length !== 1 ||
-          routes.value.conflicts.length
+          model.value.entities.length !== selection.length ||
+          !equal(
+            model.value.entities
+              .map((entity) => identifyUrl(entity.source_url).crawl_key)
+              .sort(),
+            selection.slice().sort(),
+          ) ||
+          routes.value.routes.length !== selection.length ||
+          !equal(
+            routes.value.routes
+              .map((route) => route.source_origin + route.request_target)
+              .sort(),
+            selection.slice().sort(),
+          ) ||
+          !routes.value.routes.every((route) =>
+            model.value.entities.some(
+              (entity) =>
+                entity.source_id === route.entity_source_id &&
+                identifyUrl(entity.source_url).crawl_key ===
+                  route.source_origin + route.request_target,
+            ),
+          ) ||
+          routes.value.conflicts.length ||
+          !equal(scope.value.selected_source_urls, selection) ||
+          scope.value.selected_url_count !== selection.length ||
+          !equal(scope.value.inventory, input.capture.inventory) ||
+          scope.value.known_url_count !== input.capture.inventory.length ||
+          scope.value.planned_route_count !== selection.length ||
+          scope.value.unresolved_url_count !==
+            input.capture.inventory.length - selection.length
         )
           throw new UpgradeError(
-            "Partial package requires one safe exact mapped page and no route conflicts",
+            "Partial package requires one safe exact mapped page per selected observation and no route conflicts",
             5,
           );
         const codeHash = sourceFingerprint(BUILD_CODE);
         const inputHash = hash(
           JSON.stringify([
-            "operator-build-v1",
+            buildDomain(input.binding),
             record.id,
             record.output_sha256,
             codeHash,

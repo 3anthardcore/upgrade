@@ -22,22 +22,22 @@ export function sourceFingerprint(paths: string[]) {
 export const defaultTokens = {
   schema_version: 1,
   color: {
-    ink: "#172429",
-    surface: "#f5f6f3",
-    paper: "#ffffff",
-    accent: "#145b45",
-    muted: "#59676b",
-    border: "#d9e0db",
+    ink: "#29231F",
+    surface: "#EEE7DD",
+    paper: "#FAF6EF",
+    accent: "#9C3E1C",
+    muted: "#665B51",
+    border: "#897B6C",
   },
   typography: {
-    family: "system-ui, sans-serif",
+    family: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif",
     body: "1rem",
     lineHeight: 1.6,
-    title: "clamp(2rem, 5vw, 4rem)",
+    title: "clamp(1.5rem, 3vw, 2.5rem)",
   },
   spacing: [4, 8, 12, 16, 24, 32, 48, 64],
-  radius: 12,
-  contentMax: 1120,
+  radius: 8,
+  contentMax: 1200,
   breakpoints: [360, 390, 768, 1024, 1440],
 };
 export function designBrief(types: string[]) {
