@@ -39,3 +39,7 @@ docker exec -u 33:33 teplypol-market-php-1 php \
 ## Продолжение
 
 Администратора повторно создавать не нужно. Штатный solution wizard намеренно не исполнялся: он может менять index.php и ставить готовое решение; используется собственный Upgrade template/router. Лицензия NOT_VERIFIED, браузерная админка/редактирование/конфликты и SQL recovery NOT_RUN. Пилот по-прежнему содержит1из25known URL, full source UNKNOWN, дизайн/торговые функции незавершённы; общий NOT_READY сохраняется.
+
+## Пользователь процесса Upgrade
+
+CLI/Store пилота выполняется от системного пользователя upgrade: `runuser -u upgrade -- /opt/upgrade/runtime/node-v24.20.0-linux-x64/bin/node /opt/upgrade/current/packages/cli/index.ts ...`. Root выполняет системную подготовку и единственные целевые docker exec, но не создаёт новые immutable artifacts в рабочем Store напрямую. Non-root validation выявила старые root-owned artifacts; восстановление владельца ограничено только рабочим проектом, private Bitrix credentials не затронуты. Новые контрольные копии этой стадии находятся под `/opt/upgrade/shared/checkpoints/teplypol-market-r9-admin-operator`.
