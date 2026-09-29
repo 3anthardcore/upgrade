@@ -43,3 +43,9 @@ Email администратора ожидается; пользователе�
 Верхнеуровневый production executor не реализован: этот интеграционный путь пока проходит через CLI сборки, принятый intent и собственный PHP importer по runbook, с единственным оператором. Документ не объявляет ручной серверный вызов готовым автоматическим deploy/import адаптером. Серверный Codex остаётся не авторизован; ранее подтверждённый локальный двухагентный smoke не заменяет серверный запуск.
 
 Следующее: применить проверенные публичные подписи без изменения фактов, сохранить конечный target receipt и checkpoint Upgrade; затем получить email, завершить admin/activation, расширить исходный scope и модель, довести дизайн/функции и провести настоящую DB recovery/административные конфликтные проверки. Общая готовность остаётся **NOT_READY**.
+
+## Фактическое обновление r8
+
+R8 принят и установлен из git247176e, manifest838682ba05352434af745140ac726cec1186dd51664900908eb744e860e3ff26. Применена новая модель с русскими labels; raw facts/provenance сохранены. Существующие13 own-code files совпали, повторной записи файлов не было. Dry-run/update1; fence2; apply updated1; strict reconcile; repeat skipped1; BITRIX_ID1 сохранился, elements/mappings/routes1,operations2. Evidence art-a0c1ff61-06ec-4a0b-8346-63693504939c.
+
+IAB проверил19 labels/4images и viewport360 без горизонтального overflow. HTTP224:221 PASS, прежние3 TRACE405 без privacy headers; report FAIL сохранён. Полнота1из25known/full sourceUNKNOWN, admin0 и прежние blockers не изменились. Задачу завершённого дизайна это изменение не закрывает.
