@@ -102,14 +102,18 @@ try {
     )) {
       if (
         denied.has(item.name) ||
-        item.name.startsWith(".env") ||
+        (item.name.startsWith(".env") && item.name !== ".env.example") ||
         /\.(?:db|sqlite|pem|key|pfx|log|zip|gz|xz)$/i.test(item.name)
       )
         continue;
       const path = resolve(directory, item.name);
       if (item.isSymbolicLink()) throw new Error("Symlink in source tree");
       if (item.isDirectory()) walk(path);
-      else if (extensions.test(item.name) || item.name === "Dockerfile")
+      else if (
+        extensions.test(item.name) ||
+        item.name === "Dockerfile" ||
+        item.name === ".env.example"
+      )
         include(path);
     }
   };
