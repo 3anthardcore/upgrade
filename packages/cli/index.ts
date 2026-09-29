@@ -13,6 +13,7 @@ import { Pipeline } from "../core/pipeline.ts";
 import { doctor } from "../core/doctor.ts";
 import { loadProfile } from "../core/config.ts";
 import { backupProject, restoreProject } from "../core/backup.ts";
+import { ingestOperatorCapture } from "../core/operator-capture.ts";
 import type { Task, AgentResult, Check } from "../contracts/index.ts";
 export const EXIT = {
   OK: 0,
@@ -73,6 +74,7 @@ export async function main(argv = process.argv.slice(2)) {
         "inspect --project ID --task TASK",
         "task create|claim|heartbeat|submit|review",
         "artifact add --project ID --file FILE --type TYPE",
+        "operator-capture ingest --project ID --directory PATH --manifest-sha256 SHA256",
         "crawl|extract|build|verify|report|package --project ID",
         "crawl|run --project ID --ack-access-block BLOCK_ID --access-resolution-reason TEXT",
         "import --project ID --dry-run",
@@ -254,6 +256,14 @@ export async function main(argv = process.argv.slice(2)) {
           text("worker"),
           text("lease") ? number("lease", 0) : undefined,
         );
+        break;
+      case "operator-capture":
+        if (sub !== "ingest") throw new UpgradeError("Use operator-capture ingest");
+        value = await ingestOperatorCapture(store, {
+          directory: text("directory", true)!,
+          expectedManifestSha256: text("manifest-sha256", true)!,
+          manifestPath: text("manifest"),
+        });
         break;
       case "run":
         if (text("until") && text("until") !== "demo-ready")

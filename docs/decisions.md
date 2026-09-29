@@ -38,3 +38,15 @@ Known KillBot titles and Cloudflare challenge headers are access evidence, not c
 CLI persists effective crawl limits. An omitted flag reuses the previous value; raising it requires a separate budget decision, which this CLI version does not implement. Old snapshots whose original limits were never saved cannot safely resume through the CLI: preserve the evidence and explicitly plan a new project/snapshot. Completed legacy artifacts also require access revalidation before extraction/build; PAUSED discovery cannot build from an older model.
 
 An operator may use the user-requested built-in browser and save observations/resources as untrusted input. That access is recorded separately from the server crawler. Codex desktop tools are not imported into the project's external API. Partial browser observations do not establish the complete URL registry, override robots, clear a server block or prove feature behavior.
+
+## ADR — закрытая установка Битрикс и граница host proxy
+
+Первый target использует отдельные корень, state, credentials, DB volume и единственную internal bridge network `upgrade-teplypol-market-isolated`. Выход к хосту блокируется отдельным INPUT guard; cross-network — правилами только для своего bridge. Перед CMS проверяются достижимые canary controls, реальные socket/PHP и DNS packet tests. Auto-restart выключен: после host/daemon restart сначала guard и probes. Это пилотный профиль, не законченный multi-project firewall manager.
+
+Docker 29.1.3 не создаёт host publication на таком internal endpoint. Ingress реализован host Nginx → pinned internal Nginx без замены URI. Второй network interface ради publication не добавляется. Публичный HTTPS остаётся с Basic Auth; операторский SSH tunnel использует отдельный loopback-only proxy и приватный credential include. Запросы мастера не логируются. Временный installation profile разрешает только конкретные PHP и статические файлы, наблюдавшиеся в официальном архиве; затем требуется возврат к demo profile. Vendor/core files не патчатся, факты лицензии не публикуются.
+
+## ADR-013 — переносимый ввод операторского браузера
+
+Desktop IAB используется оператором для наблюдения, а проект получает собственный versioned capture manifest и файлы с внешним SHA pin. Нет вызовов внутренних desktop API из приложения. Capture остаётся недоверенным PARTIAL input: выбранные поля не равны полному DOM, все наблюдаемые и прежние URL сохраняются в отдельном inventory, full source denominator UNKNOWN. Сетевой access block не снимается по факту открытия страницы другим браузером.
+
+Maintenance CLI сохраняет immutable exact bytes и PENDING/COMMITTED receipt, сверяет уже опубликованный результат до повтора и закрепляет исходный crawl artifact. Другой SHA для capture ID — конфликт. Это отдельный приём данных; extract/model/target readiness не выводятся автоматически из COMMITTED.

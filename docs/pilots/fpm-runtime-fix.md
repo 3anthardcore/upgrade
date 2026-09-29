@@ -1,0 +1,19 @@
+# Права prepend и журнал запросов FPM
+
+Задача `fix-fpm-runtime-permissions`, исполнитель `fpm-runtime-fixer`, вход `art-9a528a3a-751f-4461-b78c-04e777b67c79b`, 29 сентября 2026. Область: только собственные Dockerfile, FPM pool config и эта записка. Сервер, БД, секреты и файлы Битрикс данным исполнителем не изменялись.
+
+Root воспроизвёл HTTP 500 на первом запросе через инертный FPM: `/opt/upgrade/prepend.php` скопирован как `root:root 0640`, каталог `/opt/upgrade` имеет 0755; worker `www-data` не может прочитать prepend. Предыдущий успешный CLI probe от root этого не проверял. Также базовый FPM писал request access log в stdout, что могло сохранить URI установщика с секретными параметрами даже при отключённом Nginx access log.
+
+## Изменение
+
+Три обычных `COPY` помещают собственные несекретные `demo.ini`, `fpm.conf`, `prepend.php`; следующий единый `RUN` задаёт `chown 0:0` и `chmod 0644` для этих трёх точных абсолютных файлов, затем 0755 только собственному каталогу `/opt/upgrade`. Конечные права больше не зависят от упаковки релиза. Нет рекурсивного chmod/chown, изменения document root, ключа лицензии, customer/Bitrix файлов или смены пользователя worker на root. Это исправление сборки образа, а не ручная правка работающего контейнера. [Dockerfile COPY/RUN](https://docs.docker.com/reference/dockerfile/).
+
+В pool `[www]` добавлено `access.log=/dev/null`. Файл установлен как `zz-upgrade.conf` после штатных pool-настроек. `clear_env=no`, `catch_workers_output=yes`, `security.limit_extensions=.php` и все ограничения `demo.ini`/prepend сохранены. PHP error logging и обработка stderr не отключаются: диагностические логи остаются закрытыми и требуют проверки на секреты перед публикацией. Отключение access log не является универсальным redaction для любого текста, который приложение само может записать в error log. [PHP-FPM access.log](https://www.php.net/manual/en/install.fpm.configuration.php).
+
+Первый исправленный вариант использовал `COPY --chmod=0644`. Root фактически запустил сборку: на сервере Docker Engine 29 используется **legacy builder**, Buildx отсутствует; сборка отвергла `--chmod`, требующий BuildKit. Версия Engine сама по себе не подтверждает выбранный builder. Ошибка произошла до создания нового runtime image, cache apt/extension-слоёв доступен; лицензированный CMS-root оставался закрыт. Поэтому вариант заменён на обычный COPY и конечный RUN с точными путями. Установка Buildx, новый frontend, смена родительского digest или ослабление защиты не требуются. Root повторяет сборку своего образа с cache, записывает новый image digest и заменяет только выделенный runtime.
+
+## Проверки и следующий шаг
+
+Первый Node assert checker подтвердил содержимое варианта COPY --chmod, но **не совместимость builder**; последующая фактическая сборка выявила описанную ошибку. После замены повторный Node checker: обычные COPY — **3/3 PASS**, точные множества трёх файлов для chown/chmod и единственного каталога 0755 — PASS, отсутствие `--chmod` и рекурсивных прав — PASS; pool settings, включая единственный `access.log=/dev/null`, — **4/4 PASS**, сохранённые INI-защиты и PHP error logging — **7/7 PASS**. Эти проверки исходников не подтверждают сборку или поведение FPM.
+
+После сборки root проверяет фактические owner/mode файлов и чтение prepend от `www-data`, конечный pool config без вывода полного environment, затем повторяет **тот же инертный HTTP/FastCGI probe** через выбранный приватный ingress. Требуются успешный HTTP-ответ, действующий sentinel prepend, правильные HTTPS/URI/Host и прежние запреты mail/process/network. Отдельный запрос с несекретным canary query не должен попасть в FPM/Nginx access logs. До получения этих результатов исправленный реальный FPM — **NOT_RUN**, лицензированный Битрикс — **NOT_RUN**; успешный `php -r` от root не принимается вместо worker/HTTP проверки.

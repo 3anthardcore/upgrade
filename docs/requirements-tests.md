@@ -51,3 +51,13 @@
 # Дополнение r4 — проверка доступа и устойчивость лимитов
 
 29.09.2026: `npm run check` PASS, `npm test` 78 PASS, `npm run test:e2e` 7 PASS, FAIL/SKIP 0. `tests/unit/access-challenge.test.ts`, `tests/integration/access-challenge.test.ts`, `tests/integration/reporter-access.test.ts`, `tests/e2e/access-resume.test.ts` расширяют доказательства AT-01/10/13/17/23/27: challenge не становится контентом, robots HTML не разрешает обход, повтор требует конкретного ack, очередь/счётчики/лимиты живут между процессами, старые или незавершённые снимки не доходят до сборки. Report учитывает источник и не скрывает неизвестную полноту за нулём сущностей. Эти результаты не подтверждают CAPTCHA bypass, полноту teplypol-market.ru или работу Битрикс. Browser operator input и server HTTP имеют раздельный статус.
+
+Серверный r4: access/reporter/CLI запуск дал 24 PASS и один CANCELLED (тайм-аут CLI при параллельной сборке PHP); отдельный последовательный повтор трёх CLI-сценариев дал 3 PASS, exit 0. Реальный KillBot robots сохранён как блок; повтор без ack не добавил запросов. Логи сохранены в `var/evidence/server-r4/`.
+
+AT-17/19/28: предварительный реальный runtime без CMS подтвердил prepend/запрет mail и process functions, доступ только к своей БД, недоступность host/cross-network/public TCP, отсутствие исходящих DNS-пакетов в контролируемом capture. Host controls положительны. HTTPS Basic Auth/noindex и точный raw URI через host proxy проверены. Это **PRE_CMS_RUNTIME_ONLY**, поэтому строка AT-28 первого bootstrap клона и Bitrix-функции остаются NOT_RUN. Дистрибутив «Бизнес» получен, активация и работа CMS ещё не подтверждены. См. `docs/pilots/bitrix-runtime.md` и независимый review.
+
+## Дополнение: portable input и FPM installer
+
+AT-01/10/13/20/23/27: `tests/integration/operator-capture.test.ts` (28) и `tests/e2e/operator-capture.test.ts` (5) подтверждают bounded portable-input validation, exact bytes, persistent partial denominator, повтор/конфликт/pin, TOCTOU, restart и reconcile неизвестной публикации. Итоговый локальный набор: check PASS, 106 tests + 12 E2E PASS, 0 FAIL/CANCEL/SKIP. Это intake доказательств, ещё не extraction/Bitrix import.
+
+AT-17/19/28: actual FPM installer preparation — 108/108 assertions над 45 HTTP requests, independent receipt review. Первый vendor wizard отображается; пакетный capture первого GET INCONCLUSIVE из-за отсутствия положительного контроля. EULA/активация/БД/admin/import/restore/функции CMS NOT_RUN. Текущая точка и команды в `docs/pilots/bitrix-installation-run.md`; не переносить PASS подготовительного runtime на целую AT-28.
