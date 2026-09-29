@@ -115,3 +115,13 @@
 - Серверный immutable archive `art-07974390-41ea-4ec7-817a-4ed734f02253`, SHA `79ce992ba30972944b8b88280fcce2a0d948a36674b9df532f99c07b8b32dd62`; подготовка `art-e5df2395-77a8-4735-818f-84e0b96e9e99`. Блок `access-eff7ee21-1e84-499e-9245-eec1142033c6` сохраняется. Архив не является результатом импорта в CMS.
 - Приняты ограниченные задачи portable validator, независимого FPM review и root installer stop. Приёмка CLI и обновление серверного release фиксируются следующим дополнением после фактических команд. Бюджет текущего run по-прежнему 20 units / 7200 seconds с исходным началом 03:25:11.993 UTC; сбросов нет.
 - Следующий шаг: развернуть проверенный CLI, принять portable input, подтвердить повтор в новом процессе; после согласия на EULA продолжить Битрикс. Извлечение модели из operator input и полноценная товарная интеграция остаются отдельной работой.
+
+## Сервер r5 и фактический приём пилота — 05:23 UTC
+
+Релиз `upgrade-0.1.0-foundation-20260929-r5` установлен, exit 0. Git source `a3e698e`, archive SHA `0f6f12528dc3c26efb84fcfa54b1ed96823e9f62e208139f5c290b193084c8d4`, 153 files. Предыдущий r4 сохранён. Изменение собственного app release не переключало CMS compose; активным остаётся `compose.cms-installer.json` с image `1fdc8caa…`.
+
+Два отдельных CLI subprocess приняли реальный portable capture: первый COMMITTED, второй replayed=true, прежние IDs/байты. Добавлено ровно 150 artifacts: 149 файлов (manifest, observation, 147 assets) и validated result `art-cd5dae19-f4df-446d-9510-eed55da7a877`. Восстановление Store между процессами подтвердило неизменность crawl artifact, access block и бюджета. Полнота: 25 known URL, 1 selected-fields, 24 unobserved, full source UNKNOWN. Receipt `/root/upgrade-install-20260929/r5-operator-pilot-receipt.json`, PASS только для intake.
+
+Все 13 ограниченных задач этого run ACCEPTED, spent13/reserved0/unknown0 из20. Run явно PAUSED без изменения начального времени/лимита. HTTP endpoint Upgrade требует auth (401), соседний ContentHub вернул200. Общий pipeline report пока отражает серверный crawl; объединённые operator URL находятся в отдельном validated result. Автоматическое включение operator input в extract/model/report — следующий незавершённый шаг, не заявленное свойство intake.
+
+Установщик по-прежнему ожидает согласия на EULA. После ответа продолжать с текущего шага; при исчерпании исходного 7200s run не сбрасывать бюджет для продолжения агентных стадий. Полный результат проекта **NOT_READY**.
