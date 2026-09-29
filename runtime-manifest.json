@@ -11,7 +11,7 @@
   "sqlite": "Node.js built-in node:sqlite; inspect doctor on target",
   "js_dependencies": "package-lock.json",
   "tested_platform": "Windows x64",
-  "linux_deployment": "r2 baseline installed; Chromium PASS; r3 source/offline/restore QA pending",
+  "linux_deployment": "r3 non-root source/model/package/offline/state-restore and Chromium PASS; full Linux suite NOT_RUN",
   "server_codex_auth": "NOT_AUTHENTICATED",
   "bitrix": "NOT_RUN",
   "mysql_target": "NOT_RUN",
