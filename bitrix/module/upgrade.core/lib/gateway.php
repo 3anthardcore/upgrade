@@ -45,7 +45,7 @@ final class Gateway
     }
     private function current(string $key): ?array
     {
-        $rows=\CIBlockElement::GetList([],['IBLOCK_ID'=>$this->iblock,'=XML_ID'=>'upgrade:'.$key],false,['nTopCount'=>2],['ID','NAME','DETAIL_TEXT','DETAIL_TEXT_TYPE','PREVIEW_TEXT','PREVIEW_TEXT_TYPE']);
+        $rows=\CIBlockElement::GetList([],['IBLOCK_ID'=>$this->iblock,'=XML_ID'=>'upgrade:'.$key],false,['nTopCount'=>2],['ID','XML_ID','ACTIVE','NAME','DETAIL_TEXT','DETAIL_TEXT_TYPE','PREVIEW_TEXT','PREVIEW_TEXT_TYPE']);
         $item=$rows->Fetch(); if (!$item) { return null; }
         if ($rows->Fetch()) { throw new \RuntimeException('DUPLICATE_EXTERNAL_ID:'.$key); }
         $properties=[];
@@ -53,7 +53,7 @@ final class Gateway
             $row=\CIBlockElement::GetProperty($this->iblock,(int)$item['ID'],[],['CODE'=>$code])->Fetch();
             $properties[$code]=(string)($row['VALUE']??'');
         }
-        return ['id'=>(int)$item['ID'],'managed'=>['NAME'=>(string)$item['NAME'],'DETAIL_TEXT'=>(string)$item['DETAIL_TEXT'],'DETAIL_TEXT_TYPE'=>(string)$item['DETAIL_TEXT_TYPE'],'PREVIEW_TEXT'=>(string)$item['PREVIEW_TEXT'],'PREVIEW_TEXT_TYPE'=>(string)$item['PREVIEW_TEXT_TYPE'],'properties'=>$properties]];
+        return ['id'=>(int)$item['ID'],'xml_id'=>(string)$item['XML_ID'],'active'=>(string)$item['ACTIVE'],'managed'=>['NAME'=>(string)$item['NAME'],'DETAIL_TEXT'=>(string)$item['DETAIL_TEXT'],'DETAIL_TEXT_TYPE'=>(string)$item['DETAIL_TEXT_TYPE'],'PREVIEW_TEXT'=>(string)$item['PREVIEW_TEXT'],'PREVIEW_TEXT_TYPE'=>(string)$item['PREVIEW_TEXT_TYPE'],'properties'=>$properties]];
     }
     private function fields(array $entity): array
     {
@@ -174,14 +174,26 @@ final class Gateway
     public function reconcile(array $package): array
     {
         $this->assetIndex=$package['asset_index'];
-        $defects=[];
+        $defects=[]; $verifiedMappings=[];
         foreach ($package['entities'] as $entity) {
-            try { $plan=$this->planEntity($entity); if (!in_array($plan['action'],['skipped','reconciled'],true)) { $defects[]=['entity'=>$entity['source_id'],'status'=>$plan['action']]; } }
+            try {
+                $plan=$this->planEntity($entity);
+                if (!in_array($plan['action'],['skipped','reconciled'],true)) { $defects[]=['entity'=>$entity['source_id'],'status'=>$plan['action']]; continue; }
+                // A matching orphan element is recoverable by apply(), not a finished route destination.
+                $key=$entity['stable_key'];
+                $mapped=$this->db->query('SELECT * FROM ug_entity WHERE ENTITY_KEY='.$this->q($key).' AND PROJECT_ID='.$this->q($this->project))->fetch();
+                if (!$mapped) { $defects[]=['entity'=>$entity['source_id'],'reason'=>'ENTITY_MAPPING_MISSING']; continue; }
+                if ((int)$mapped['BITRIX_ID']!==$plan['id'] || $mapped['ENTITY_KEY']!==$key || $mapped['PROJECT_ID']!==$this->project || $mapped['ENTITY_TYPE']!==$entity['type'] || $mapped['SOURCE_ID']!==$entity['source_id'] || !hash_equals((string)$mapped['MANAGED_HASH'],$plan['hash']) || !hash_equals((string)$mapped['PAYLOAD_HASH'],hash('sha256',self::encode($entity)))) { $defects[]=['entity'=>$entity['source_id'],'reason'=>'ENTITY_MAPPING_MISMATCH']; continue; }
+                $current=$this->current($key);
+                if (!$current || $current['id']!==$plan['id'] || $current['xml_id']!=='upgrade:'.$key || $current['active']!=='Y' || !hash_equals($plan['hash'],hash('sha256',self::encode($current['managed'])))) { $defects[]=['entity'=>$entity['source_id'],'reason'=>'ENTITY_DESTINATION_MISMATCH']; continue; }
+                $verifiedMappings[$key]=$current['id'];
+            }
             catch (\Throwable $error) { $defects[]=['entity'=>$entity['source_id'],'reason'=>$error->getMessage()]; }
         }
         foreach ($package['routes'] as $expected) {
             $actual=$this->db->query('SELECT * FROM ug_route WHERE PROJECT_ID='.$this->q($this->project).' AND ROUTE_KEY='.$this->q($expected['route_key']))->fetch();
             if (!$actual || $actual['REQUEST_TARGET']!==$expected['request_target'] || (int)$actual['STATUS']!==$expected['expected_status'] || ($actual['ENTITY_KEY']??null)!==$expected['entity_key'] || ($actual['REDIRECT_TARGET']??null)!==$expected['redirect_target']) { $defects[]=['route'=>$expected['request_target'],'reason'=>'ROUTE_MISMATCH']; }
+            if ($expected['expected_status']===200 && !isset($verifiedMappings[$expected['entity_key']??''])) { $defects[]=['route'=>$expected['request_target'],'reason'=>'ROUTE_ENTITY_MAPPING_UNVERIFIED']; }
         }
         foreach ($package['assets'] as $asset) { $file=$_SERVER['DOCUMENT_ROOT'].$asset['public_path']; if (!is_file($file)||!hash_equals($asset['sha256'],(string)hash_file('sha256',$file))) { $defects[]=['asset'=>$asset['sha256'],'reason'=>'ASSET_MISMATCH']; } }
         $known=array_map(static fn($asset)=>basename($asset['path']),$package['assets']);

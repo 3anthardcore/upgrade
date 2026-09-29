@@ -1,6 +1,7 @@
 <?php
 declare(strict_types=1);
 if (PHP_SAPI !== 'cli') { http_response_code(403); exit; }
+try {
 if (!defined('UPGRADE_SANDBOX_PREPEND_ACTIVE') || UPGRADE_SANDBOX_PREPEND_ACTIVE!==true || realpath((string)ini_get('auto_prepend_file'))!=='/opt/upgrade/prepend.php') { throw new RuntimeException('Isolated PHP prepend required before Bitrix bootstrap'); }
 $disabled=array_map('trim',explode(',',(string)ini_get('disable_functions')));
 foreach (['mail','exec','passthru','shell_exec','system','popen','proc_open'] as $function) { if (!in_array($function,$disabled,true)) { throw new RuntimeException('Demo function policy required'); } }
@@ -56,10 +57,14 @@ if (!$existing) {
     }
     $db->queryExecute('INSERT INTO ug_project (PROJECT_ID,IBLOCK_ID) VALUES ('.$q($project).','.(int)$id.')');
 } else { $id = (int)$existing['IBLOCK_ID']; }
-\Bitrix\Main\ModuleManager::registerModule('upgrade.core');
+if (!\Bitrix\Main\ModuleManager::isModuleInstalled('upgrade.core')) { \Bitrix\Main\ModuleManager::registerModule('upgrade.core'); }
 // Explicit site-scoped install, not a modification of vendor template files.
 $site = new CSite();
 if (!$site->Update($siteId, ['TEMPLATE'=>[['CONDITION'=>'', 'SORT'=>1, 'TEMPLATE'=>'upgrade']]])) { throw new RuntimeException($site->LAST_ERROR); }
 \Bitrix\Main\Config\Option::set('upgrade.core', 'project_id', $project, $siteId);
 \Bitrix\Main\Config\Option::set('upgrade.core', 'iblock_id', (string)$id, $siteId);
 echo json_encode(['status'=>'INSTALLED', 'project_id'=>$project, 'iblock_id'=>$id, 'runtime_verification'=>'NOT_RUN'], JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT).PHP_EOL;
+} catch (\Throwable $error) {
+    fwrite(STDERR,json_encode(['status'=>'ERROR','stage'=>'migration','class'=>get_class($error),'reason'=>$error->getMessage()],JSON_UNESCAPED_UNICODE|JSON_INVALID_UTF8_SUBSTITUTE).PHP_EOL);
+    exit(1);
+}
