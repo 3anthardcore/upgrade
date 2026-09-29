@@ -95,3 +95,17 @@ AT20/27: account-stage checkpoint от служебного upgrade — backup10
 ## Каталог r10: локальная приёмка — 29.09.2026
 
 AT01/10/13/23/27: ALL_OBSERVED сохраняет весь исходный реестр, v1/v2 повтор, restore и неизвестные публикации; реальный операторский capture131, выбранное множество103,known943/fullUNKNOWN. AT14/15: TS/PHP link/card контракты, точные query, MIME/hash, escaped facts и malformed items проверены до target writes. AT09/17: новый шаблон, доступные имена ссылок, фактологичная навигация и собственные media; реальный expanded Bitrix browser пока NOT_RUN. AT22: фактический designer Codex CLI job/input/output/role pins и независимый proposal review PASS, input ограничен прежней моделью одной страницы. Общие check PASS,249tests+23E2E PASS0SKIP. Source actions/form/cart не считаются реализованными. Подробности и frozen reviews — pilots/catalog-stage.md и reviews/catalog-*.md. AT20 fresh target backup выполняется; SQL restore NOT_RUN.
+# Дополнение: native catalogue r12, 29.09.2026
+
+| Требование | Фактическая проверка | Результат и граница |
+|---|---|---|
+| Повтор без дублей и unknown-write reconciliation | r11 error → отдельный reconcile; r12 native apply/reconcile/repeat | PASS в выбранном scope103:102created/1updated; repeat0/0/103skipped, oldID1 сохранён |
+| URL и значимые параметры | HTTPS103exact request targets, включая16query | PASS выбранных маршрутов;840из943known unresolved, fullUNKNOWN |
+| Фактический контент | Native103rawfactsSHA + HTTPS10300textvalues +802unique mediaSHA | PASS в проверенных пределах; порядок/кратность textnodes и полнаяvisual semantics не доказаны |
+| Пределы native property | Actual r11 truncationFAIL; lossless codec,5PHPtests и GatewayAdd/update/repeat | r12 PASS; encoded≤60000bytes, legacyraw≤65535; несжимаемые oversized data блокируются |
+| Реальная команда и независимый review | Persisted disjoint tasks, agent code/reviews, designerCLI, Store artifacts/fencing | Исполнение фактическое; r10/r11 REJECT сохранён, поздний media review не принят задним числом |
+| Изоляция | HTTPS401/POST403/admin+license+resume404; native orders0/mail0 | PASS этих6probes; новая полнаяprivacy matrix NOT_RUN, старыйTRACEheadersFAIL не стёрт |
+| Адаптивный UI | Root IAB1280/360,menu/catalog/product/contacts,decodedphotos,3/1columns | Bounded PASS; final design/a11y/keyboard/full103visual QA NOT_RUN |
+| Backup/recovery | Fresh SQL/files checksum/gzip/listing + предыдущий Upgrade state restore | Backup integrityPASS; настоящий SQLrestoreNOT_RUN |
+
+Команды: `npm run check` PASS; `npm test`257PASS; `npm run test:e2e`23PASS,0SKIP; `operator build --all-observed`; native PHP `dry-run`, `claim`, `apply`, `reconcile`, repeat`apply`; `scripts/verify-pilot-http.py`; `scripts/verify-pilot-bitrix.php`. Evidence `var/evidence/catalog-stage/*r12-final.txt`, `var/evidence/server-r12`, `docs/reviews/catalog-target-r12.md`. Общий статус **NOT_READY**: incomplete source, commerce/search, license activation, native admin editing, SQL restore остаются открытыми.

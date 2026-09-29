@@ -37,21 +37,24 @@ namespace {
 class Rows { public function __construct(private array $rows){} public function Fetch(){return array_shift($this->rows)?:false;} }
 class CIBlockElement {
     public static array $row=[]; public static array $properties=[]; public static int $elementWrites=0; public static int $searchWrites=0;
+    public static bool $allowWrites=false; public string $LAST_ERROR='';
     public static function GetList($order,$filter,$group,$nav,$select) {
-        if (($filter['IBLOCK_ID']??null)!==1 || ($filter['=XML_ID']??null)!==self::$row['XML_ID']) return new Rows([]);
+        if (($filter['IBLOCK_ID']??null)!==1 || ($filter['=XML_ID']??null)!==(self::$row['XML_ID']??null)) return new Rows([]);
         return new Rows([array_intersect_key(self::$row,array_fill_keys($select,true))]);
     }
     public static function GetByID($id) { return new Rows($id===7?[self::$row]:[]); }
     public static function GetProperty($iblock,$id,$order,$filter) { if($iblock!==1||$id!==7) throw new RuntimeException('Wrong property binding'); return new Rows([['VALUE'=>self::$properties[$filter['CODE']]]]); }
-    public function Add(...$args) { self::$elementWrites++; throw new RuntimeException('Matching recovered element must not be duplicated'); }
-    public function Update(...$args) { self::$elementWrites++; throw new RuntimeException('Matching recovered element must not be rewritten'); }
-    public static function SetPropertyValuesEx(...$args) { self::$elementWrites++; throw new RuntimeException('Matching recovered properties must not be rewritten'); }
+    public function Add(...$args) { self::$elementWrites++; if(!self::$allowWrites)throw new RuntimeException('Matching recovered element must not be duplicated'); $f=$args[0];self::$properties=array_map(static fn($v)=>substr($v,0,65535),$f['PROPERTY_VALUES']);unset($f['PROPERTY_VALUES']);self::$row=['ID'=>7]+$f;return 7; }
+    public function Update(...$args) { self::$elementWrites++; if(!self::$allowWrites)throw new RuntimeException('Matching recovered element must not be rewritten');self::$row=array_replace(self::$row,$args[1]);return true; }
+    public static function SetPropertyValuesEx(...$args) { self::$elementWrites++; if(!self::$allowWrites)throw new RuntimeException('Matching recovered properties must not be rewritten');self::$properties=array_map(static fn($v)=>substr($v,0,65535),$args[2]); }
     public static function UpdateSearch(...$args) { self::$searchWrites++; }
 }
 class CIBlock { public static function clearIblockTagCache($id): void { if($id!==1) throw new RuntimeException('Wrong cache binding'); } }
 require $argv[1]; require $argv[2];
 $project='gateway-review'; $key=hash('sha256',json_encode([$project,'page','source-1'],JSON_UNESCAPED_SLASHES));
 $entity=['source_id'=>'source-1','type'=>'page','stable_key'=>$key,'title'=>'Title & raw','description'=>'Description <raw>','seo'=>['title'=>'SEO & raw','description'=>'Observed description','h1'=>'Observed H1'],'blocks'=>[['type'=>'paragraph','text'=>'Actual <script>source</script> & text']],'facts'=>['price'=>['value'=>null,'status'=>'UNKNOWN']]];
+$scenario=$argv[4];
+if(str_starts_with($scenario,'codec-'))$entity['facts']['observed_text']=['value'=>str_repeat('Точный факт & <значение> / ',15000),'status'=>'OBSERVED'];
 $encode=static fn($value): string=>json_encode($value,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES|JSON_THROW_ON_ERROR);
 $fields=['NAME'=>'Title & raw','DETAIL_TEXT'=>'<p>Actual &lt;script&gt;source&lt;/script&gt; &amp; text</p>','DETAIL_TEXT_TYPE'=>'html','PREVIEW_TEXT'=>'Description <raw>','PREVIEW_TEXT_TYPE'=>'text','properties'=>['UG_SEO_TITLE'=>'SEO & raw','UG_DESCRIPTION'=>'Observed description','UG_H1'=>'Observed H1','UG_FACTS'=>$encode($entity['facts'])]];
 CIBlockElement::$properties=$fields['properties'];
@@ -68,7 +71,19 @@ if($r->getMethod('fields')->invoke($g,$entity)!==$fields) throw new RuntimeExcep
 $_SERVER['DOCUMENT_ROOT']=$argv[3];
 $package=['manifest'=>['blockers'=>[]],'manifest_hash'=>str_repeat('b',64),'entities'=>[$entity],'routes'=>[$route],'assets'=>[],'asset_index'=>[]];
 $scenario=$argv[4]; $output=['kind'=>'OWN_PHP_CONTRACT_NOT_BITRIX','scenario'=>$scenario];
-if($scenario==='missing-map') {
+if(str_starts_with($scenario,'codec-')) {
+    CIBlockElement::$allowWrites=true;
+    if($scenario==='codec-create'){CIBlockElement::$row=[];CIBlockElement::$properties=[];$db->mapping=null;}
+    else{CIBlockElement::$row['NAME']='Previous owner-mapped name';CIBlockElement::$properties['UG_FACTS']='[]';$old=$fields;$old['NAME']=CIBlockElement::$row['NAME'];$old['properties']['UG_FACTS']='[]';$db->mapping['MANAGED_HASH']=hash('sha256',$encode($old));}
+    $output['dry_run']=$g->dryRun($package);
+    $output['apply']=$g->apply($package,1,'writer',$argv[5]);
+    $output['raw_facts_match']=\Upgrade\Core\Router::content(7)['UPGRADE_PROPERTIES']['UG_FACTS']===$encode($entity['facts']);
+    $output['stored_bytes']=strlen(CIBlockElement::$properties['UG_FACTS']);
+    $output['raw_bytes']=strlen($encode($entity['facts']));
+    $output['writes_after_first']=CIBlockElement::$elementWrites;
+    $output['second_apply']=$g->apply($package,1,'writer',$argv[5]);
+    $output['writes_after_second']=CIBlockElement::$elementWrites;
+} elseif($scenario==='missing-map') {
     $db->mapping=null;
     $output['before']=$g->reconcile($package);
     $output['router_before']=\Upgrade\Core\Router::resolve($project,$target);
@@ -95,6 +110,20 @@ if($scenario==='missing-map') {
 echo $encode($output),PHP_EOL;
 }
 `;
+
+for (const action of ["create", "update"]) {
+  test(`own PHP contract: large factual properties survive ${action}, readback and repeat within the native byte limit`, { skip: !php }, () => {
+    const result = execute(`codec-${action}`);
+    assert.equal(result.apply[action === "create" ? "created" : "updated"], 1);
+    assert.equal(result.apply.verification.status, "DATABASE_RECONCILED");
+    assert.ok(result.raw_bytes > 65535);
+    assert.ok(result.stored_bytes <= 60000);
+    assert.equal(result.raw_facts_match, true);
+    assert.equal(result.second_apply.skipped, 1);
+    assert.equal(result.second_apply.verification.status, "DATABASE_RECONCILED");
+    assert.equal(result.writes_after_second, result.writes_after_first);
+  });
+}
 
 function execute(scenario: string) {
   assert.ok(php);

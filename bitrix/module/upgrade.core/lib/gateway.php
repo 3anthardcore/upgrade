@@ -1,6 +1,7 @@
 <?php
 declare(strict_types=1);
 namespace Upgrade\Core;
+require_once __DIR__.'/factsproperty.php';
 
 final class Gateway
 {
@@ -59,6 +60,7 @@ final class Gateway
         foreach (['UG_SEO_TITLE','UG_DESCRIPTION','UG_H1','UG_FACTS'] as $code) {
             $row=\CIBlockElement::GetProperty($this->iblock,(int)$item['ID'],[],['CODE'=>$code])->Fetch();
             $properties[$code]=(string)($row['VALUE']??'');
+            if ($code==='UG_FACTS') { $properties[$code]=FactsProperty::decode($properties[$code]); }
         }
         return ['id'=>(int)$item['ID'],'xml_id'=>(string)$item['XML_ID'],'active'=>(string)$item['ACTIVE'],'managed'=>['NAME'=>(string)$item['NAME'],'DETAIL_TEXT'=>(string)$item['DETAIL_TEXT'],'DETAIL_TEXT_TYPE'=>(string)$item['DETAIL_TEXT_TYPE'],'PREVIEW_TEXT'=>(string)$item['PREVIEW_TEXT'],'PREVIEW_TEXT_TYPE'=>(string)$item['PREVIEW_TEXT_TYPE'],'properties'=>$properties]];
     }
@@ -103,6 +105,9 @@ final class Gateway
         }
         if ($cardGroup) { $html[]='</div>'; }
         $seo=$entity['seo']??[];
+        // Bitrix string properties have a finite byte capacity. Validate the lossless
+        // storage representation during dry-run, before any media or entity writes.
+        FactsProperty::encode(self::encode($entity['facts']??[]));
         return ['NAME'=>$entity['title'],'DETAIL_TEXT'=>implode("\n",$html),'DETAIL_TEXT_TYPE'=>'html','PREVIEW_TEXT'=>(string)($entity['description']??''),'PREVIEW_TEXT_TYPE'=>'text','properties'=>['UG_SEO_TITLE'=>(string)($seo['title']??$entity['title']),'UG_DESCRIPTION'=>(string)($seo['description']??$entity['description']??''),'UG_H1'=>(string)($seo['h1']??$entity['title']),'UG_FACTS'=>self::encode($entity['facts']??[])]];
     }
     private function planEntity(array $entity): array
@@ -160,6 +165,7 @@ final class Gateway
             try {
                 $this->fence($token,$owner);
                 $plan=$this->planEntity($entity); $fields=$plan['fields']; $properties=$fields['properties']; unset($fields['properties']);
+                $properties['UG_FACTS']=FactsProperty::encode($properties['UG_FACTS']);
                 $element=new \CIBlockElement(); $id=$plan['id'];
                 if ($plan['action']==='created') {
                     $id=$element->Add($fields+['IBLOCK_ID'=>$this->iblock,'XML_ID'=>'upgrade:'.$entity['stable_key'],'ACTIVE'=>'Y','PROPERTY_VALUES'=>$properties],false,false);

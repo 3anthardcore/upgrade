@@ -1,6 +1,7 @@
 <?php
 declare(strict_types=1);
 namespace Upgrade\Core;
+require_once __DIR__.'/factsproperty.php';
 
 final class Router
 {
@@ -27,6 +28,7 @@ final class Router
         foreach (['UG_SEO_TITLE','UG_DESCRIPTION','UG_H1','UG_FACTS'] as $code) {
             $property=\CIBlockElement::GetProperty((int)$item['IBLOCK_ID'],$id,[],['CODE'=>$code])->Fetch();
             $item['UPGRADE_PROPERTIES'][$code]=(string)($property['VALUE']??'');
+            if ($code==='UG_FACTS') { $item['UPGRADE_PROPERTIES'][$code]=FactsProperty::decode($item['UPGRADE_PROPERTIES'][$code]); }
         }
         return $item;
     }
