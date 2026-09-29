@@ -1,0 +1,20 @@
+{
+  "$schema":"http://json-schema.org/draft-07/schema#",
+  "$id":"upgrade/bitrix-package/1.0",
+  "type":"object",
+  "additionalProperties":false,
+  "required":["schema_version","project_id","source_version","mode","target_profile","files","entity_count","route_count","blockers","warnings","runtime_verification"],
+  "properties":{
+    "schema_version":{"const":"1.0"},
+    "project_id":{"type":"string","pattern":"^[a-z0-9][a-z0-9-]{0,62}$"},
+    "source_version":{"type":"string","minLength":1},
+    "mode":{"const":"public-demo"},
+    "target_profile":{"const":"editable-content-snapshot"},
+    "files":{"type":"object","minProperties":3,"required":["data/entities.json","data/routes.json","data/assets.json"],"additionalProperties":{"type":"string","pattern":"^[a-f0-9]{64}$"}},
+    "entity_count":{"type":"integer","minimum":0},
+    "route_count":{"type":"integer","minimum":0},
+    "blockers":{"type":"array","items":{"type":"string"}},
+    "warnings":{"type":"array","items":{"type":"string"}},
+    "runtime_verification":{"const":"NOT_RUN"}
+  }
+}

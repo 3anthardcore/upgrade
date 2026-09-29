@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "verified_at": "2026-09-29",
+  "application": "Upgrade 0.1.0",
+  "node": "24.20.0",
+  "npm": "11.19.0",
+  "codex_cli": "0.154.0",
+  "playwright": "1.63.0",
+  "chromium": "153.0.8010.12",
+  "php_lint": "8.3.35",
+  "sqlite": "Node.js built-in node:sqlite; inspect doctor on target",
+  "js_dependencies": "package-lock.json",
+  "tested_platform": "Windows x64",
+  "linux_deployment": "NOT_RUN",
+  "bitrix": "NOT_RUN",
+  "mysql_target": "NOT_RUN",
+  "docker_target": "NOT_RUN",
+  "notes": [
+    "PHP package validator and template tests do not verify a real Bitrix installation.",
+    "Target images require verified digests; no latest image is assumed.",
+    "Server disk expansion permission is pending; existing services unchanged."
+  ]
+}

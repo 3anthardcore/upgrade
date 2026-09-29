@@ -1,0 +1,15 @@
+{
+  "schema_version": "1.0",
+  "target": "Bitrix CMS isolated public demo",
+  "status": "NOT_RUN",
+  "php_minimum_vendor": "8.2",
+  "mysql_minimum_vendor": "8.0",
+  "proposed_php_branch": "8.3",
+  "lint_php_version": "8.3.35",
+  "bitrix_version": null,
+  "bitrix_edition": null,
+  "image_digests": null,
+  "docker_runtime": "UNAVAILABLE",
+  "compatibility": "NOT_RUN",
+  "required_before_execution": ["Licensed Bitrix distribution and edition", "Dedicated Linux/WSL2 Docker host with disk space", "Pinned tested PHP, MySQL and Nginx image digests", "Private secrets and target project binding", "Outbound isolation test before first PHP", "Bitrix installation, import, edit, URL and browser tests"]
+}

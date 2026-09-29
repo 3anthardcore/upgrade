@@ -1,0 +1,134 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "profile", "crawl", "agents", "demo"],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "profile": {
+      "type": "string"
+    },
+    "crawl": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_html_pages",
+        "max_assets",
+        "max_download_bytes",
+        "max_wall_time_minutes",
+        "requests_per_second_per_host",
+        "concurrency_per_host",
+        "respect_robots",
+        "max_redirects"
+      ],
+      "properties": {
+        "max_html_pages": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000,
+          "default": 10000
+        },
+        "max_assets": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000,
+          "default": 50000
+        },
+        "max_download_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000000000,
+          "default": 10737418240
+        },
+        "max_wall_time_minutes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1440,
+          "default": 240
+        },
+        "requests_per_second_per_host": {
+          "type": "number",
+          "minimum": 0.1,
+          "maximum": 10,
+          "default": 1
+        },
+        "concurrency_per_host": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2,
+          "default": 2
+        },
+        "respect_robots": {
+          "const": true
+        },
+        "max_redirects": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10,
+          "default": 5
+        }
+      }
+    },
+    "agents": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_workers",
+        "max_task_attempts",
+        "max_fix_cycles",
+        "max_tasks",
+        "max_wall_time_seconds"
+      ],
+      "properties": {
+        "max_workers": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3,
+          "default": 3
+        },
+        "max_task_attempts": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3,
+          "default": 3
+        },
+        "max_fix_cycles": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2,
+          "default": 2
+        },
+        "max_tasks": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 100
+        },
+        "max_wall_time_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 86400,
+          "default": 3600
+        }
+      }
+    },
+    "demo": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["access", "indexing", "outbound_integrations"],
+      "properties": {
+        "access": {
+          "const": "authenticated"
+        },
+        "indexing": {
+          "const": "disabled"
+        },
+        "outbound_integrations": {
+          "const": "disabled"
+        }
+      }
+    }
+  }
+}

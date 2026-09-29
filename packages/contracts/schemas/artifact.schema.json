@@ -1,0 +1,62 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": [
+    "artifact_id",
+    "project_id",
+    "run_id",
+    "type",
+    "relative_path",
+    "sha256",
+    "size_bytes",
+    "schema_version",
+    "producer_task_id",
+    "input_hashes",
+    "created_at",
+    "validation_status"
+  ],
+  "properties": {
+    "artifact_id": {
+      "type": "string"
+    },
+    "project_id": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "type": {
+      "type": "string"
+    },
+    "relative_path": {
+      "type": "string"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "size_bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "producer_task_id": {
+      "type": ["string", "null"]
+    },
+    "input_hashes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "created_at": {
+      "type": "string"
+    },
+    "validation_status": {
+      "enum": ["VALID", "INVALID"]
+    }
+  },
+  "additionalProperties": false
+}

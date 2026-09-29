@@ -1,0 +1,21 @@
+schema_version: 1
+profile: public
+crawl:
+  max_html_pages: 10000
+  max_assets: 50000
+  max_download_bytes: 10737418240
+  max_wall_time_minutes: 240
+  requests_per_second_per_host: 1
+  concurrency_per_host: 2
+  respect_robots: true
+  max_redirects: 5
+agents:
+  max_workers: 3
+  max_task_attempts: 3
+  max_fix_cycles: 2
+  max_tasks: 100
+  max_wall_time_seconds: 3600
+demo:
+  access: authenticated
+  indexing: disabled
+  outbound_integrations: disabled

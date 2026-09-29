@@ -1,0 +1,227 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "task_id",
+    "project_id",
+    "run_id",
+    "stage",
+    "role",
+    "goal",
+    "input_artifact_ids",
+    "depends_on",
+    "allowed_paths",
+    "allowed_tools",
+    "acceptance_checks",
+    "status",
+    "attempt",
+    "max_attempts",
+    "lease_owner",
+    "lease_until",
+    "fencing_token",
+    "budget",
+    "idempotency_key",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "task_id": {
+      "type": "string"
+    },
+    "project_id": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string"
+    },
+    "stage": {
+      "type": "string"
+    },
+    "role": {
+      "type": "string"
+    },
+    "goal": {
+      "type": "string"
+    },
+    "input_artifact_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "depends_on": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "allowed_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "allowed_tools": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "acceptance_checks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "status": {
+      "enum": [
+        "PENDING",
+        "READY",
+        "RUNNING",
+        "VALIDATING",
+        "ACCEPTED",
+        "RETRY_WAIT",
+        "BLOCKED",
+        "FAILED",
+        "CANCELLED",
+        "STALE"
+      ]
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "max_attempts": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 3
+    },
+    "lease_owner": {
+      "type": ["string", "null"]
+    },
+    "lease_until": {
+      "type": ["number", "null"]
+    },
+    "fencing_token": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "budget": {
+      "type": "object",
+      "required": ["max_seconds", "reserved_units"],
+      "properties": {
+        "max_seconds": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 86400
+        },
+        "reserved_units": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "idempotency_key": {
+      "type": "string"
+    },
+    "created_at": {
+      "type": "string"
+    },
+    "updated_at": {
+      "type": "string"
+    },
+    "input_hash": {
+      "type": "string"
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id",
+        "attempt",
+        "input_hash",
+        "artifact_ids",
+        "summary",
+        "checks",
+        "unresolved_issues",
+        "suggested_followups",
+        "usage",
+        "runtime_version"
+      ],
+      "properties": {
+        "task_id": {
+          "type": "string"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "input_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "artifact_ids": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "summary": {
+          "type": "string"
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "status"],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "status": {
+                "enum": ["PASS", "FAIL", "NOT_RUN"]
+              },
+              "details": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "unresolved_issues": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "suggested_followups": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "usage": {
+          "type": "object"
+        },
+        "runtime_version": {
+          "type": "string"
+        }
+      }
+    },
+    "retry_after": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "attempt_started_at": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "additionalProperties": false
+}

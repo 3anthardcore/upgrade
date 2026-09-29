@@ -1,0 +1,13 @@
+node_modules/
+var/
+.env
+*.db
+*.db-wal
+*.db-shm
+test-results/
+playwright-report/
+.cache/
+infra/compose/secrets/
+bitrix/distribution/
+__pycache__/
+*.pyc

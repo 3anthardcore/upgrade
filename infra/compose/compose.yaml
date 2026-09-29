@@ -1,0 +1,61 @@
+name: ${UPGRADE_PROJECT_ID:?Set an isolated project id}
+services:
+  php:
+    build:
+      context: ..
+      dockerfile: provisioning/Dockerfile
+      args:
+        PHP_IMAGE: ${UPGRADE_PHP_IMAGE:?Provide a tested PHP 8.3 image pinned by digest}
+    environment:
+      UPGRADE_DEMO: "1"
+      UPGRADE_PROJECT_ID: ${UPGRADE_PROJECT_ID}
+      UPGRADE_TARGET_ID: ${UPGRADE_TARGET_ID:?Configure an immutable id for this demo instance}
+    volumes:
+      - ${UPGRADE_DOCUMENT_ROOT:?Dedicated licensed Bitrix root required}:/var/www/html
+      - ${UPGRADE_STATE_DIR:?Private target state directory required}:/var/lib/upgrade
+    networks: [isolated]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    # PHP-FPM master starts as root in the official image; these three are needed to drop worker privileges.
+    cap_add: [CHOWN, SETGID, SETUID]
+    tmpfs: [/tmp]
+    depends_on:
+      db:
+        condition: service_healthy
+  nginx:
+    image: ${UPGRADE_NGINX_IMAGE:?Provide tested nginx image pinned by digest}
+    ports: ["127.0.0.1:${UPGRADE_HTTP_PORT:-8090}:8080"]
+    volumes:
+      - ${UPGRADE_DOCUMENT_ROOT}:/var/www/html:ro
+      - ../nginx/demo.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${UPGRADE_HTPASSWD_FILE:?Create a per-demo password file outside Git}:/etc/nginx/demo.htpasswd:ro
+    networks: [isolated]
+    depends_on: [php]
+    security_opt: [no-new-privileges:true]
+  db:
+    image: ${UPGRADE_MYSQL_IMAGE:?Provide tested MySQL 8.0+ image pinned by digest}
+    command: ["--event-scheduler=OFF", "--local-infile=OFF"]
+    environment:
+      MYSQL_DATABASE: upgrade
+      MYSQL_USER: upgrade
+      MYSQL_PASSWORD_FILE: /run/secrets/db_password
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/db_root_password
+    secrets: [db_password, db_root_password]
+    volumes: [database:/var/lib/mysql]
+    networks: [isolated]
+    healthcheck:
+      test: [CMD, mysqladmin, ping, --silent]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    security_opt: [no-new-privileges:true]
+networks:
+  isolated:
+    internal: true
+volumes:
+  database: {}
+secrets:
+  db_password:
+    file: ${UPGRADE_DB_PASSWORD_FILE:?Secret reference required}
+  db_root_password:
+    file: ${UPGRADE_DB_ROOT_PASSWORD_FILE:?Secret reference required}
