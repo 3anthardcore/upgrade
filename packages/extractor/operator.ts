@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { Ajv } from "ajv";
 import { load } from "cheerio";
 import type { CheerioAPI } from "cheerio";
@@ -571,6 +572,9 @@ export async function extractOperatorContent(
   };
   const assets = new Map<string, OperatorAsset>();
   for (const item of capture.assets) {
+    // A synchronous artifact resolver only advances microtasks. Give lease
+    // heartbeats a macrotask turn between bounded source files instead.
+    await yieldToEventLoop();
     const url = sameOrigin(item.source_url).crawl_key;
     if (
       assets.has(url) ||
@@ -659,6 +663,7 @@ export async function extractOperatorContent(
   };
   const observedPages = new Set<string>();
   for (const observation of capture.observations) {
+    await yieldToEventLoop();
     const identity = sameOrigin(observation.source_url);
     const document = sameOrigin(observation.document_url);
     if (
