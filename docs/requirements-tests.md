@@ -65,3 +65,9 @@ AT-17/19/28: actual FPM installer preparation — 108/108 assertions над 45 H
 Сервер r5: реальный пилотный capture принят двумя различными процессами CLI;149 исходных файлов+1 результат, повтор без дубликатов, неизменные source block/crawl artifact/budget и PAUSED. Receipt `r5-operator-pilot-receipt.json` от05:23:16 UTC, scope REAL_PILOT_OPERATOR_INTAKE_ONLY. Это дополнительное поведение AT-20/27; включение операторского input в общие extraction/report и настоящий target остаются незавершёнными.
 
 AT-20/27, серверная контрольная копия r5:194 backup files,189 artifacts восстановлены в отдельный каталог;149 capture files и13 accepted tasks проверены после restore, budget/PAUSED сохранены, dispatcher detached. Receipt `art-934debf8-eb28-444b-99e6-e20ff4b979cb`. Проверка ограничена Upgrade state; Bitrix DB/runtime recovery NOT_RUN.
+
+## Operator model/build/report — 29.09.2026,06:54 UTC
+
+AT-01/10/13/20/23/27 расширены17 extractor tests,22 operator-report tests и8 operator-model E2E. Проверяются точные поля/URL/query, отсутствие выдуманной commerce semantics, SHA/provenance, missing-media blockers, полный known source denominator при damaged capture, инертный report, offline повтор и restore, неизвестный результат записи,20 metadata tamper variants. Итог после независимых review fixes: check PASS,145 tests+20 E2E PASS,0 FAIL/CANCEL/SKIP. Команды и raw logs в PROGRESS. Это частичная модель/пакет, **не** AT настоящего Bitrix import/admin/commerce/restore.
+
+AT-17/19/28: штатная установка CMS фактически начала создавать модули. Факт записи и отсутствие активных соединений перед resume не являются полной проверкой изоляции/первого bootstrap. Новый временный вход использует documented wizard API и прежний сетевой профиль; PHP lint/nginx -t PASS. Активация, итоговая установка/admin, реальные gateway/URL/function/Bitrix restore остаются NOT_RUN на этой точке.

@@ -75,6 +75,8 @@ export async function main(argv = process.argv.slice(2)) {
         "task create|claim|heartbeat|submit|review",
         "artifact add --project ID --file FILE --type TYPE",
         "operator-capture ingest --project ID --directory PATH --manifest-sha256 SHA256",
+        "operator model --project ID --capture ID --manifest-sha256 SHA256 [--page URL]",
+        "operator build --project ID --capture ID --manifest-sha256 SHA256 --model MODEL_ID",
         "crawl|extract|build|verify|report|package --project ID",
         "crawl|run --project ID --ack-access-block BLOCK_ID --access-resolution-reason TEXT",
         "import --project ID --dry-run",
@@ -100,12 +102,21 @@ export async function main(argv = process.argv.slice(2)) {
   }
   const accessBlock = text("ack-access-block");
   const accessReason = text("access-resolution-reason");
-  const accessRequested = f["ack-access-block"] !== undefined || f["access-resolution-reason"] !== undefined;
-  if (accessRequested && (
-    !["crawl", "run"].includes(command) || !accessBlock ||
-    !/^access-[A-Za-z0-9-]+$/.test(accessBlock) ||
-    !accessReason || accessReason.trim().length < 10 || accessReason.trim().length > 2000
-  )) throw new UpgradeError("Use crawl/run with --ack-access-block BLOCK_ID and --access-resolution-reason TEXT (10..2000 characters); confirm legitimate source access first");
+  const accessRequested =
+    f["ack-access-block"] !== undefined ||
+    f["access-resolution-reason"] !== undefined;
+  if (
+    accessRequested &&
+    (!["crawl", "run"].includes(command) ||
+      !accessBlock ||
+      !/^access-[A-Za-z0-9-]+$/.test(accessBlock) ||
+      !accessReason ||
+      accessReason.trim().length < 10 ||
+      accessReason.trim().length > 2000)
+  )
+    throw new UpgradeError(
+      "Use crawl/run with --ack-access-block BLOCK_ID and --access-resolution-reason TEXT (10..2000 characters); confirm legitimate source access first",
+    );
   const id = text(command === "init" ? "id" : "project", true)!;
   const root = projectRoot(data, id);
   if (command !== "init" && !existsSync(resolve(root, "state/upgrade.db")))
@@ -122,9 +133,13 @@ export async function main(argv = process.argv.slice(2)) {
       ? number("max-bytes", 10_737_418_240)
       : undefined,
     targetUrl: text("target-url"),
-    accessResume: accessRequested ? {
-      blockId: accessBlock!, acknowledgementId: uid("access-ack"), reason: accessReason!.trim(),
-    } : undefined,
+    accessResume: accessRequested
+      ? {
+          blockId: accessBlock!,
+          acknowledgementId: uid("access-ack"),
+          reason: accessReason!.trim(),
+        }
+      : undefined,
   });
   try {
     let value: unknown,
@@ -258,13 +273,31 @@ export async function main(argv = process.argv.slice(2)) {
         );
         break;
       case "operator-capture":
-        if (sub !== "ingest") throw new UpgradeError("Use operator-capture ingest");
+        if (sub !== "ingest")
+          throw new UpgradeError("Use operator-capture ingest");
         value = await ingestOperatorCapture(store, {
           directory: text("directory", true)!,
           expectedManifestSha256: text("manifest-sha256", true)!,
           manifestPath: text("manifest"),
         });
         break;
+      case "operator": {
+        const { createOperatorModel, buildOperatorPackage } =
+          await import("../core/operator-model.ts");
+        const options = {
+          captureId: text("capture", true)!,
+          manifestSha256: text("manifest-sha256", true)!,
+          page: text("page"),
+        };
+        if (sub === "model") value = await createOperatorModel(store, options);
+        else if (sub === "build")
+          value = await buildOperatorPackage(store, {
+            ...options,
+            modelId: text("model", true)!,
+          });
+        else throw new UpgradeError("Use operator model or operator build");
+        break;
+      }
       case "run":
         if (text("until") && text("until") !== "demo-ready")
           throw new UpgradeError("Only --until demo-ready is supported");

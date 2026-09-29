@@ -50,3 +50,9 @@ Docker 29.1.3 не создаёт host publication на таком internal endp
 Desktop IAB используется оператором для наблюдения, а проект получает собственный versioned capture manifest и файлы с внешним SHA pin. Нет вызовов внутренних desktop API из приложения. Capture остаётся недоверенным PARTIAL input: выбранные поля не равны полному DOM, все наблюдаемые и прежние URL сохраняются в отдельном inventory, full source denominator UNKNOWN. Сетевой access block не снимается по факту открытия страницы другим браузером.
 
 Maintenance CLI сохраняет immutable exact bytes и PENDING/COMMITTED receipt, сверяет уже опубликованный результат до повтора и закрепляет исходный crawl artifact. Другой SHA для capture ID — конфликт. Это отдельный приём данных; extract/model/target readiness не выводятся автоматически из COMMITTED.
+
+## ADR-014 — явная частичная сборка из операторского ввода
+
+Пока автоматический источник заблокирован, отдельный operator model/build может сформировать пакет ровно одной наблюдавшейся страницы. Он не подменяет обычные stages, не снимает access block и не угадывает полноту сайта. Все known URLs входят в signed-by-hash scope файла пакета;24 из25 остаются unresolved в первом пилоте. Пакет получает видимый partial banner; model,route,scope,release закрепляют исходный capture/crawl и code hashes. Integrity COMMITTED отделена от import blockers и target readiness. Любая metadata-only несовместимость при replay отклоняется, а не исправляется молча.
+
+Истёкший run закрывается с причиной deadline, его история/счётчики сохраняются. Явное продолжение пользователя создаёт новый ограниченный run и ссылку на прежний checkpoint; начальное время и бюджет старого run не переписываются.
