@@ -14,6 +14,8 @@ import { dirname, resolve, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Ajv } from "ajv";
 import packageSchema from "./package.schema.json" with { type: "json" };
+import type { CommerceModel } from "../contracts/commerce.ts";
+import { projectDemoSnapshot } from "./demo.ts";
 
 export interface BitrixEntityInput {
   source_id: string;
@@ -56,6 +58,7 @@ export interface BitrixPackageInput {
     body_path?: string;
   }>;
   assetRoot?: string;
+  commerce?: CommerceModel;
 }
 export interface PackageManifest {
   schema_version: "1.0";
@@ -444,6 +447,10 @@ export async function buildBitrixPackage(
   await add("data/entities.json", json(entities));
   await add("data/routes.json", json(routes));
   await add("data/assets.json", json(assetRecords));
+  if (input.commerce) await add("data/demo-snapshot.json", json(projectDemoSnapshot({
+    projectId: input.projectId, entities: input.entities, routes: input.routes,
+    commerce: input.commerce, assets: assetRecords,
+  })));
   for (const [path, asset] of assetFiles) {
     await mkdir(dirname(resolve(packageDir, path)), { recursive: true });
     await pipeline(

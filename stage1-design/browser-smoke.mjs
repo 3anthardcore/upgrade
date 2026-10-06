@@ -1,0 +1,2 @@
+import fs from 'node:fs';import crypto from 'node:crypto';import {capture} from './source-capture.mjs';
+const id=crypto.randomUUID();fs.mkdirSync('data/jobs/'+id);console.log('capture_id',id);try{const s=await capture(id,'https://teplypol-market.ru/');console.log(JSON.stringify({ok:true,mode:s.browser_mode,title:s.title,text_length:s.text.length,images:s.images.length,requests:s.requests}));}catch(e){console.log('capture_error',e.message);process.exitCode=1;}

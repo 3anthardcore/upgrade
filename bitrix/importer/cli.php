@@ -2,13 +2,14 @@
 declare(strict_types=1);
 if (PHP_SAPI!=='cli') { http_response_code(403); exit; }
 require __DIR__.'/package.php';
-$options=getopt('', ['command:','package:','project:','manifest-sha256:','document-root:','owner:','fence:','state-dir:','backup-receipt:','backup-receipt-sha256:']);
+$options=getopt('', ['command:','package:','project:','target-id:','manifest-sha256:','document-root:','owner:','fence:','state-dir:','backup-receipt:','backup-receipt-sha256:']);
 $command=(string)($options['command']??'validate'); $project=(string)($options['project']??'');
 try {
     // Validation occurs before Bitrix bootstrap or any target write.
     $package=\Upgrade\Importer\Package::read((string)($options['package']??''),$project,(string)($options['manifest-sha256']??''));
     if ($command==='validate') { echo json_encode(['status'=>'PACKAGE_VALID','blockers'=>$package['manifest']['blockers']],JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT).PHP_EOL; exit; }
     if (!in_array($command,['dry-run','claim','apply','reconcile'],true)) { throw new RuntimeException('UNKNOWN_COMMAND'); }
+    if (isset($options['target-id']) && (!getenv('UPGRADE_TARGET_ID') || !hash_equals((string)getenv('UPGRADE_TARGET_ID'),(string)$options['target-id']))) { throw new RuntimeException('TARGET_ID_BINDING_MISMATCH'); }
     if (!defined('UPGRADE_SANDBOX_PREPEND_ACTIVE') || UPGRADE_SANDBOX_PREPEND_ACTIVE!==true || realpath((string)ini_get('auto_prepend_file'))!=='/opt/upgrade/prepend.php') { throw new RuntimeException('ISOLATED_PHP_PREPEND_REQUIRED_BEFORE_BOOTSTRAP'); }
     $disabled=array_map('trim',explode(',',(string)ini_get('disable_functions')));
     foreach (['mail','exec','passthru','shell_exec','system','popen','proc_open'] as $function) { if (!in_array($function,$disabled,true)) { throw new RuntimeException('DEMO_FUNCTION_POLICY_REQUIRED'); } }
@@ -23,7 +24,10 @@ try {
     $gateway=new \Upgrade\Core\Gateway($project,$state);
     switch ($command) {
         case 'dry-run': $result=$gateway->dryRun($package); break;
-        case 'claim': $result=$gateway->claim((string)($options['owner']??'')); break;
+        // Full bounded packages may require more than five minutes. The gateway
+        // still checks this finite fence before/after each transaction and never
+        // revives an expired owner; process death is reconciled before retry.
+        case 'claim': $result=$gateway->claim((string)($options['owner']??''),3600); break;
         case 'reconcile': $result=$gateway->reconcile($package); break;
         case 'apply':
             $receiptFile=(string)($options['backup-receipt']??'');
@@ -35,5 +39,6 @@ try {
             if (!$receipt||($receipt['project_id']??'')!==$project||($receipt['status']??'')!=='INTEGRITY_VERIFIED'||!is_file((string)($receipt['database_file']??''))||!hash_equals((string)($receipt['database_sha256']??''),(string)hash_file('sha256',$receipt['database_file']))) { throw new RuntimeException('VERIFIED_DATABASE_BACKUP_REQUIRED'); }
             $result=$gateway->apply($package,(int)($options['fence']??0),(string)($options['owner']??''),$state); break;
     }
+    $result['_target']=['project_id'=>$project,'target_id'=>(string)getenv('UPGRADE_TARGET_ID'),'manifest_sha256'=>$package['manifest_hash']];
     echo json_encode($result,JSON_UNESCAPED_UNICODE|JSON_PRETTY_PRINT|JSON_THROW_ON_ERROR).PHP_EOL;
 } catch (Throwable $error) { fwrite(STDERR,json_encode(['status'=>'ERROR','reason'=>$error->getMessage()],JSON_UNESCAPED_UNICODE).PHP_EOL); exit(1); }

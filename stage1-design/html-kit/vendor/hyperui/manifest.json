@@ -1,0 +1,27 @@
+{
+  "repository": "https://github.com/markmead/hyperui",
+  "commit": "2b5aebbc50d2c9ac89650f51b554f53895b4803c",
+  "license": "MIT",
+  "files": [
+    {
+      "path": "LICENSE",
+      "sha256": "60e0bb845a95da072acc1ada114cf8ce325347ed9d5f802d8d7fd9b511248f98"
+    },
+    {
+      "path": "public/examples/marketing/headers/1.html",
+      "sha256": "4c69e60c41685496d36f787e85360cededf5de2948c66483f7763aeb8a0563b9"
+    },
+    {
+      "path": "public/examples/marketing/cards/1.html",
+      "sha256": "1d17e51c0f30ef1aff5aa3b632396e38445242bf145b99f7088e4c0f35aeb51e"
+    },
+    {
+      "path": "public/examples/marketing/footers/1.html",
+      "sha256": "4a48b505a38ac724a1280001f7b31dbbc724c15f59bd6f9c22ed9a92cb70bf73"
+    },
+    {
+      "path": "public/examples/marketing/sections/1.html",
+      "sha256": "def73b7cc2563dc01c5c9a69aa2307076cb02ad1220df6f9ca9704e4a7fe00b3"
+    }
+  ]
+}

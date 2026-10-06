@@ -11,9 +11,97 @@ import {
 import { resolve, join, dirname, basename } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
+import { performance } from "node:perf_hooks";
 import { Store, hash, inside } from "../../packages/core/index.ts";
 import { ingestOperatorCapture } from "../../packages/core/operator-capture.ts";
 import type { Artifact } from "../../packages/contracts/index.ts";
+
+test("bounded synchronous ingestion yields to the actual lease heartbeat and replays without duplicates", async (t) => {
+  const f = fixture();
+  const realInterval = globalThis.setInterval;
+  // Compress timer and lease durations, retaining the actual renewal callback,
+  // SQLite ownership checks, elapsed clock and synchronous publication work.
+  t.mock.method(globalThis, "setInterval", (callback: (...args: any[]) => void, delay: number, ...args: any[]) =>
+    realInterval(callback, delay === 10000 ? 5 : delay, ...args));
+  const acquire = f.store.acquireDispatcher.bind(f.store);
+  const renew = f.store.renewDispatcher.bind(f.store);
+  const publish = f.store.publishArtifact.bind(f.store);
+  let renewals = 0, publications = 0, stress = false;
+  f.store.acquireDispatcher = (id, owner) => acquire(id, owner);
+  f.store.renewDispatcher = (id, owner) => {
+    if (stress) renewals++;
+    return renew(id, owner, stress ? 1500 : 60000);
+  };
+  for (let i = 1; i <= 36; i++) {
+    const name = `page-${i}.html`;
+    writeFileSync(join(f.capture, name), f.html);
+    f.manifest.observations.push({
+      ...f.manifest.observations[0],
+      source_url: source + `page-${i}`, document_url: source + `page-${i}`,
+      file: { ...f.manifest.observations[0].file, relative_path: name },
+    });
+  }
+  const bytes = JSON.stringify(f.manifest);
+  writeFileSync(join(f.capture, "operator-capture.json"), bytes);
+  f.options.expectedManifestSha256 = hash(bytes);
+  f.store.publishArtifact = (...args) => {
+    if (!stress) {
+      stress = true;
+      renew(f.store.currentRun().run_id, f.store.currentRun().dispatcher_owner!, 1500);
+    }
+    const until = performance.now() + 50;
+    while (performance.now() < until) { /* bounded synchronous disk-work fixture */ }
+    publications++;
+    return publish(...args);
+  };
+  try {
+    const result = await ingestOperatorCapture(f.store, f.options);
+    assert.equal(result.state, "COMMITTED");
+    assert.equal(result.files.length, 38);
+    assert.ok(renewals >= 5, `Actual timer did not renew during ingestion: ${renewals}`);
+    const count = f.store.list("artifact").length, written = publications;
+    const replay = await ingestOperatorCapture(f.store, f.options);
+    assert.equal(replay.replayed, true);
+    assert.equal(f.store.list("artifact").length, count);
+    assert.equal(publications, written);
+    assert.equal(f.store.currentRun().execution_status, "PAUSED");
+  } finally {
+    f.store.close();
+    cleanup(f.dir);
+  }
+});
+
+test("ownership takeover between source files stops publication and retry reconciles the earlier write", async () => {
+  const f = fixture(), publish = f.store.publishArtifact.bind(f.store);
+  let changed = false;
+  f.store.publishArtifact = (...args) => {
+    const artifact = publish(...args);
+    if (!changed) {
+      changed = true;
+      setImmediate(() => {
+        const run = f.store.currentRun();
+        run.dispatcher_until = 0;
+        f.store.transaction(() => f.store.put("run", run.run_id, run));
+        f.store.acquireDispatcher(run.run_id, "other-process");
+      });
+    }
+    return artifact;
+  };
+  try {
+    await assert.rejects(ingestOperatorCapture(f.store, f.options), /ownership lost/);
+    assert.equal(f.store.list("artifact").length, 2);
+    assert.equal(f.store.list<any>("operator_capture")[0].state, "PENDING");
+    assert.equal(f.store.currentRun().dispatcher_owner, "other-process");
+    f.store.releaseDispatcher(f.store.currentRun().run_id, "other-process");
+    f.store.publishArtifact = publish;
+    const result = await ingestOperatorCapture(f.store, f.options);
+    assert.equal(result.state, "COMMITTED");
+    assert.equal(f.store.list("artifact").length, 4);
+  } finally {
+    f.store.close();
+    cleanup(f.dir);
+  }
+});
 
 const block = "access-eff7ee21-1e84-499e-9245-eec1142033c6";
 const source = "https://source.example/";

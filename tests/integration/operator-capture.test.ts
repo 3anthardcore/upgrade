@@ -1,11 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import {
   mkdtemp,
   mkdir,
   writeFile,
   readFile,
+  readdir,
   rm,
   rename,
   symlink,
@@ -13,7 +15,10 @@ import {
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { validateOperatorCapture } from "../../packages/crawler/operator.ts";
+import {
+  validateOperatorCapture,
+  OPERATOR_CAPTURE_LIMITS,
+} from "../../packages/crawler/operator.ts";
 import type {
   OperatorCaptureManifest,
   OperatorCaptureOptions,
@@ -506,6 +511,326 @@ test("manifest, per-file, aggregate, observation and union denominator budgets a
       );
   } finally {
     await f.close();
+  }
+});
+
+test("512 MB aggregate cap includes manifest bytes and rejects rather than truncates at the chosen boundary", async () => {
+  const f = await fixture();
+  try {
+    assert.equal(OPERATOR_CAPTURE_LIMITS.totalBytes, 512_000_000);
+    assert.equal(OPERATOR_CAPTURE_LIMITS.fileBytes, 20_000_000);
+    assert.equal(OPERATOR_CAPTURE_LIMITS.observations, 1_000);
+    assert.equal(OPERATOR_CAPTURE_LIMITS.assets, 5_000);
+    const total =
+      (await readFile(path.join(f.options.directory, "operator-capture.json")))
+        .length +
+      [...f.manifest.observations, ...f.manifest.assets].reduce(
+        (n, item) => n + item.file.size_bytes,
+        0,
+      );
+    const exact = await validateOperatorCapture({
+      ...f.options,
+      limits: { totalBytes: total },
+    });
+    assert.equal(exact.observations.length, f.manifest.observations.length);
+    assert.equal(exact.assets.length, f.manifest.assets.length);
+    await assert.rejects(
+      validateOperatorCapture({
+        ...f.options,
+        limits: { totalBytes: total - 1 },
+      }),
+      { code: "CAPTURE_LIMIT" },
+    );
+    await assert.rejects(
+      validateOperatorCapture({
+        ...f.options,
+        limits: { totalBytes: 512_000_001 },
+      }),
+      { code: "CAPTURE_LIMIT" },
+    );
+    assert.equal(
+      sha(
+        await readFile(path.join(f.options.directory, "operator-capture.json")),
+      ),
+      f.options.expectedManifestSha256,
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("offline pack inherits the complete verified prior registry without inheriting observed status; budgets never truncate", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "upgrade-pack-capacity-"));
+  const packScript = path.resolve("scripts/pack-browser-observations.ts");
+  try {
+    const oldRoot = path.join(
+      root,
+      "var/pilots/teplypol-operator-capture-media-20260929",
+    );
+    const a = path.join(root, "raw-a"),
+      b = path.join(root, "raw-b"),
+      evidence = path.join(root, "evidence");
+    await Promise.all([
+      mkdir(oldRoot, { recursive: true }),
+      mkdir(a),
+      mkdir(b),
+    ]);
+    const pdf = Buffer.from(
+      "%PDF-1.4\n% inert retained source document\n%%EOF",
+    );
+    await writeFile(path.join(oldRoot, "manual.pdf"), pdf);
+    const legacy = {
+      project_id: "teplypol-market",
+      source_origin: origin,
+      inventory: { urls: [origin + "/", origin + "/old-unresolved"] },
+      assets: [
+        {
+          source_url: origin + "/manual.pdf",
+          observed_on_urls: [origin + "/"],
+          mime: "application/pdf",
+          file: {
+            relative_path: "manual.pdf",
+            sha256: sha(pdf),
+            size_bytes: pdf.length,
+          },
+        },
+      ],
+    };
+    await writeFile(
+      path.join(oldRoot, "operator-capture.json"),
+      JSON.stringify(legacy),
+    );
+    const records = [
+      {
+        root: a,
+        source_url: origin + "/",
+        requested_url: origin + "/original?m",
+        html: '<h1>Home</h1><a href="/manual.pdf">Manual</a><a href="/new-unobserved">Next</a>',
+        links: [origin + "/manual.pdf", origin + "/new-unobserved"],
+      },
+      {
+        root: b,
+        source_url: origin + "/catalog?m=",
+        requested_url: origin + "/catalog?m",
+        html: '<h1>Catalog</h1><img src="/missing.jpg">',
+        links: [],
+      },
+    ];
+    const files: { path: string; sha256: string; size_bytes: number }[] = [];
+    for (const record of records) {
+      const file = path.join(record.root, "snapshot.raw.json");
+      const bytes = JSON.stringify({
+        ...record,
+        document_url: record.source_url,
+        observed_at: "2026-09-30T04:00:00.000Z",
+      });
+      await writeFile(file, bytes);
+      files.push({
+        path: file,
+        sha256: sha(bytes),
+        size_bytes: Buffer.byteLength(bytes),
+      });
+    }
+    const freezePath = path.join(root, "freeze.json"),
+      freezeBytes = JSON.stringify({
+        schema_version: 1,
+        kind: "raw-input-freeze",
+        files,
+      });
+    await writeFile(freezePath, freezeBytes);
+    const priorRoot = path.join(root, "prior-capture");
+    await mkdir(path.join(priorRoot, "pages"), { recursive: true });
+    const priorHtml =
+      '<h1>Previously observed page</h1><a href="/prior-only.pdf?x=1&amp;x=2&amp;empty=">Document</a><a href="/prior-only.jpg">Full image</a><a href="/alias#detail">Section</a><a href="/derived-unresolved">Not visited</a>';
+    const priorPage = path.join(priorRoot, "pages/prior.html");
+    await writeFile(priorPage, priorHtml);
+    const registryPath = path.join(priorRoot, "operator-capture.json"),
+      registryBytes = JSON.stringify({
+        schema_version: 1,
+        kind: "operator-capture",
+        capture_id: "prior-capture",
+        project_id: "teplypol-market",
+        source_origin: origin,
+        captured_at: "2026-09-30T03:00:00.000Z",
+        inventory: {
+          basis: "operator-observed-urls",
+          urls: [origin + "/prior-only"],
+        },
+        observations: [
+          {
+            source_url: origin + "/prior-observed",
+            document_url: origin + "/prior-observed",
+            observed_at: "2026-09-30T03:00:00.000Z",
+            format: "dom-html",
+            file: {
+              relative_path: "pages/prior.html",
+              sha256: sha(priorHtml),
+              size_bytes: Buffer.byteLength(priorHtml),
+            },
+          },
+        ],
+        assets: [],
+      });
+    await writeFile(registryPath, registryBytes);
+    const prior = await validateOperatorCapture({
+      directory: priorRoot,
+      expectedManifestSha256: sha(registryBytes),
+      expectedProjectId: "teplypol-market",
+      expectedSourceUrl: origin + "/",
+    });
+    assert.equal(prior.coverage.dom_observed, 1);
+    const run = (
+      output: string,
+      id: string,
+      extra: string[] = [],
+      scope?: { file: string; pin: string },
+    ) =>
+      spawnSync(
+        process.execPath,
+        [
+          packScript,
+          a,
+          output,
+          id,
+          scope?.file ?? "",
+          scope?.pin ?? "",
+          b,
+          "--report-dir",
+          evidence,
+          "--raw-freeze",
+          freezePath,
+          "--raw-freeze-sha256",
+          sha(freezeBytes),
+          "--registry-manifest",
+          registryPath,
+          "--registry-sha256",
+          sha(registryBytes),
+          ...extra,
+        ],
+        { cwd: root, encoding: "utf8", timeout: 20_000 },
+      );
+    const output = path.join(root, "accepted"),
+      ok = run(output, "capacity-test");
+    assert.equal(ok.status, 0, ok.stderr);
+    const receipt = JSON.parse(ok.stdout),
+      report = JSON.parse(await readFile(receipt.reportPath, "utf8"));
+    const manifest = JSON.parse(
+      await readFile(path.join(output, "operator-capture.json"), "utf8"),
+    );
+    assert.equal(manifest.observations.length, 2);
+    for (const url of [
+      origin + "/original?m",
+      origin + "/catalog?m",
+      origin + "/catalog?m=",
+      origin + "/prior-only",
+      origin + "/prior-observed",
+      origin + "/prior-only.pdf?x=1&x=2&empty=",
+      origin + "/prior-only.jpg",
+      origin + "/alias",
+      origin + "/alias#detail",
+      origin + "/derived-unresolved",
+      origin + "/old-unresolved",
+    ])
+      assert.ok(manifest.inventory.urls.includes(url), url);
+    assert.equal(report.requested_url_mismatches.length, 2);
+    assert.ok(
+      report.requested_url_mismatches.every(
+        (item: any) => item.http_status === null,
+      ),
+    );
+    assert.ok(report.missing_asset_urls.includes(origin + "/missing.jpg"));
+    assert.equal(report.coverage.full_source_denominator, "UNKNOWN");
+    assert.equal(report.source_raw_pins.length, 2);
+    assert.deepEqual(
+      await readFile(path.join(output, manifest.assets[0].file.relative_path)),
+      pdf,
+    );
+    const scopePath = path.join(root, "selected-scope.json"),
+      scopeBytes = JSON.stringify({
+        ...manifest,
+        observations: manifest.observations.filter(
+          (item: { source_url: string }) => item.source_url === origin + "/",
+        ),
+      });
+    await writeFile(scopePath, scopeBytes);
+    const stageOutput = path.join(root, "selected-stage"),
+      stage = run(stageOutput, "selected-stage", [], {
+        file: scopePath,
+        pin: sha(scopeBytes),
+      });
+    assert.equal(stage.status, 0, stage.stderr);
+    const stageReceipt = JSON.parse(stage.stdout);
+    const staged = await validateOperatorCapture({
+      directory: stageOutput,
+      expectedManifestSha256: stageReceipt.manifest_sha256,
+      expectedProjectId: "teplypol-market",
+      expectedSourceUrl: origin + "/",
+    });
+    assert.equal(staged.coverage.dom_observed, 1);
+    assert.equal(staged.coverage.selected_fields, 0);
+    assert.equal(staged.coverage.full_source_denominator, "UNKNOWN");
+    assert.equal(staged.state, "PARTIAL");
+    assert.deepEqual(
+      staged.observations.map((item) => item.source_url),
+      [origin + "/"],
+    );
+    for (const previous of prior.inventory) {
+      const inherited = staged.inventory.find(
+        (item) => item.crawl_key === previous.crawl_key,
+      );
+      assert.ok(inherited, previous.crawl_key);
+      for (const raw of previous.raw_urls)
+        assert.ok(inherited.raw_urls.includes(raw), raw);
+      if (previous.crawl_key !== origin + "/")
+        assert.equal(inherited.observation, "UNOBSERVED");
+    }
+    assert.equal(
+      staged.inventory.find((item) => item.crawl_key === origin + "/catalog?m=")
+        ?.observation,
+      "UNOBSERVED",
+      "raw pages excluded from this stage do not become observed through inheritance",
+    );
+    assert.ok(!staged.assets.some((item) => item.source_url === origin + "/prior-only.jpg"));
+    assert.equal(await readFile(registryPath, "utf8"), registryBytes);
+    assert.equal(await readFile(priorPage, "utf8"), priorHtml);
+    const failedOutput = path.join(root, "failed"),
+      failed = run(failedOutput, "capacity-failed", [
+        "--max-total-bytes",
+        String(report.total_bytes_including_manifest - 1),
+      ]);
+    assert.notEqual(failed.status, 0);
+    assert.match(
+      failed.stderr,
+      /Total capture cap exceeded including manifest/,
+    );
+    await assert.rejects(
+      readFile(path.join(failedOutput, "operator-capture.json")),
+      { code: "ENOENT" },
+    );
+    assert.notEqual(
+      run(path.join(root, "raise"), "capacity-raise", [
+        "--max-total-bytes",
+        "512000001",
+      ]).status,
+      0,
+    );
+    await writeFile(priorPage, priorHtml.replace("Previously", "Tampered"));
+    const corruptPrior = run(path.join(root, "corrupt-prior"), "corrupt-prior");
+    assert.notEqual(corruptPrior.status, 0);
+    assert.match(corruptPrior.stderr, /CAPTURE_HASH|size or SHA-256/);
+    assert.ok(
+      !(await readdir(root)).some((name) => name.startsWith("corrupt-prior")),
+      "prior payload must be verified before staging or publication",
+    );
+    await writeFile(priorPage, priorHtml);
+    await writeFile(files[0].path, "{}");
+    const changed = run(path.join(root, "changed"), "capacity-changed");
+    assert.notEqual(changed.status, 0);
+    assert.match(changed.stderr, /Raw freeze byte pin mismatch/);
+  } finally {
+    assert.equal(path.dirname(path.resolve(root)), path.resolve(os.tmpdir()));
+    assert.match(path.basename(root), /^upgrade-pack-capacity-/);
+    await rm(root, { recursive: true, force: true });
   }
 });
 

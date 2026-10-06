@@ -32,7 +32,15 @@ async function command(
     p.on("exit", (code) => done(code === 0));
   });
 }
-export async function doctor(dataDir: string) {
+export async function doctor(
+  dataDir: string,
+  nativeBinding?: {
+    project_id: string;
+    target_id: string;
+    profile_id: string;
+    profile_sha256: string;
+  },
+) {
   mkdirSync(dataDir, { recursive: true });
   const disk = statfsSync(dataDir);
   let codex: unknown;
@@ -87,13 +95,19 @@ export async function doctor(dataDir: string) {
       wsl,
       bitrix: {
         ok: false,
-        status: "NOT_RUN",
-        reason:
-          "Operator must configure licensed Bitrix root, isolated database and environment profile.",
+        status: nativeBinding
+          ? "HANDOFF_CONFIGURED_NATIVE_CHECK_NOT_RUN"
+          : "NOT_CONFIGURED",
+        binding: nativeBinding ?? null,
+        reason: nativeBinding
+          ? "Public handoff binding is configured. Private operator execution, activation and full QA are separate checks."
+          : "Operator must configure licensed Bitrix root, isolated database and environment profile.",
       },
     },
     blockers: [
-      "No licensed Bitrix environment configured; DEMO_READY is blocked.",
+      nativeBinding
+        ? "Native execution and complete readiness have not been checked by doctor."
+        : "No licensed Bitrix environment configured; DEMO_READY is blocked.",
     ],
     notes: [
       "Docker daemon availability is distinct from CLI installation.",

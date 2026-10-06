@@ -2,7 +2,11 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { resolve, relative, basename } from "node:path";
 import { Store, UpgradeError, hash, inside, uid } from "./index.ts";
 import type { Artifact, Project } from "../contracts/index.ts";
-import { crawlSite, verifyCrawlSnapshots, assertNoStoredAccessChallenge } from "../crawler/index.ts";
+import {
+  crawlSite,
+  verifyCrawlSnapshots,
+  assertNoStoredAccessChallenge,
+} from "../crawler/index.ts";
 import { CrawlError } from "../crawler/network.ts";
 import type { CrawlOptions, CrawlResult } from "../crawler/index.ts";
 import { extractContent } from "../extractor/index.ts";
@@ -15,6 +19,11 @@ import { verifyRoutes } from "../verifier/index.ts";
 import { writeReport } from "../reporter/index.ts";
 import { loadProfile } from "./config.ts";
 import { sourceFingerprint, defaultTokens, designBrief } from "./design.ts";
+import {
+  nativeConfiguration,
+  nativeGuard,
+  prepareNativeHandoff,
+} from "./native-run.ts";
 
 export interface PipelineOptions {
   fixtureOrigin?: string;
@@ -116,7 +125,7 @@ export class Pipeline {
     let lost = false;
     const timer = setInterval(() => {
       try {
-        this.store.acquireDispatcher(r.run_id, owner);
+        this.store.renewDispatcher(r.run_id, owner);
       } catch {
         lost = true;
       }
@@ -125,6 +134,9 @@ export class Pipeline {
       this.assertOwnership(options.maintenance ?? false);
       const value = await fn();
       if (lost) throw new UpgradeError("Dispatcher ownership lost", 3);
+      // The stage may intentionally finish as PAUSED/BLOCKED. Its lease must
+      // still be current, but that terminal result must remain observable.
+      this.assertOwnership(true);
       return value;
     } finally {
       clearInterval(timer);
@@ -150,16 +162,43 @@ export class Pipeline {
       this.store.list<ReturnType<typeof loadProfile>>("profile")[0] ??
       loadProfile(p.target.environment_profile);
     const savedOptions = this.store.list<any>("crawl-options")[0];
-    const priorSnapshot = existsSync(inside(this.store.root, "source/crawl.json"));
-    const limitKeys = ["maxPages", "maxAssets", "maxRequests", "maxBytes", "maxWallTimeMs"] as const;
-    if (priorSnapshot && (!savedOptions || limitKeys.some(key => !Number.isFinite(savedOptions[key])))) {
-      this.store.event("crawl.legacy_limits_unknown", "pipeline", {action: "new_explicit_snapshot_required"}, this.store.currentRun().run_id);
+    const priorSnapshot = existsSync(
+      inside(this.store.root, "source/crawl.json"),
+    );
+    const limitKeys = [
+      "maxPages",
+      "maxAssets",
+      "maxRequests",
+      "maxBytes",
+      "maxWallTimeMs",
+    ] as const;
+    if (
+      priorSnapshot &&
+      (!savedOptions ||
+        limitKeys.some((key) => !Number.isFinite(savedOptions[key])))
+    ) {
+      this.store.event(
+        "crawl.legacy_limits_unknown",
+        "pipeline",
+        { action: "new_explicit_snapshot_required" },
+        this.store.currentRun().run_id,
+      );
       this.store.setRunStatus("PAUSED");
-      throw new UpgradeError("Legacy crawl limits were not recorded; cannot safely reconstruct them. Preserve this evidence and plan a new project/snapshot with explicit limits", 3);
+      throw new UpgradeError(
+        "Legacy crawl limits were not recorded; cannot safely reconstruct them. Preserve this evidence and plan a new project/snapshot with explicit limits",
+        3,
+      );
     }
     for (const key of ["maxPages", "maxRequests", "maxBytes"] as const) {
-      if (savedOptions?.[key] !== undefined && this.options[key] !== undefined && this.options[key]! > savedOptions[key])
-        throw new UpgradeError(`Increasing ${key} requires a separately recorded budget decision; automatic resume cannot expand it`, 2);
+      if (
+        savedOptions?.[key] !== undefined &&
+        this.options[key] !== undefined &&
+        this.options[key]! > savedOptions[key]
+      )
+        throw new UpgradeError(
+          `Increasing ${key} requires a separately recorded budget decision; automatic resume cannot expand it`,
+          2,
+        );
     }
     const options: CrawlOptions = {
       sourceUrl: p.source.entry_url,
@@ -169,24 +208,45 @@ export class Pipeline {
       fixtureOrigins: this.options.fixtureOrigin
         ? [this.options.fixtureOrigin]
         : (savedOptions?.fixtureOrigins ?? []),
-      maxPages: this.options.maxPages ?? savedOptions?.maxPages ?? profile.crawl.max_html_pages,
+      maxPages:
+        this.options.maxPages ??
+        savedOptions?.maxPages ??
+        profile.crawl.max_html_pages,
       maxAssets: savedOptions?.maxAssets ?? profile.crawl.max_assets,
-      maxRequests: this.options.maxRequests ?? savedOptions?.maxRequests ?? 65000,
-      maxBytes: this.options.maxBytes ?? savedOptions?.maxBytes ?? profile.crawl.max_download_bytes,
-      maxWallTimeMs: savedOptions?.maxWallTimeMs ?? profile.crawl.max_wall_time_minutes * 60_000,
+      maxRequests:
+        this.options.maxRequests ?? savedOptions?.maxRequests ?? 65000,
+      maxBytes:
+        this.options.maxBytes ??
+        savedOptions?.maxBytes ??
+        profile.crawl.max_download_bytes,
+      maxWallTimeMs:
+        savedOptions?.maxWallTimeMs ??
+        profile.crawl.max_wall_time_minutes * 60_000,
       maxRedirects: savedOptions?.maxRedirects ?? profile.crawl.max_redirects,
-      respectRobots: savedOptions?.respectRobots ?? profile.crawl.respect_robots,
-      requestsPerSecond: savedOptions?.requestsPerSecond ?? (this.options.fixtureOrigin
-        ? 100
-        : profile.crawl.requests_per_second_per_host),
+      respectRobots:
+        savedOptions?.respectRobots ?? profile.crawl.respect_robots,
+      requestsPerSecond:
+        savedOptions?.requestsPerSecond ??
+        (this.options.fixtureOrigin
+          ? 100
+          : profile.crawl.requests_per_second_per_host),
       signal: this.options.signal,
       accessResume: this.options.accessResume,
     };
     // Omission retains the recorded limit; an explicit flag can only lower it during this snapshot.
     // The one-use access acknowledgement and process signal must never become reusable configuration.
-    const {signal: _signal, accessResume: _accessResume, ...persistentOptions} = options;
+    const {
+      signal: _signal,
+      accessResume: _accessResume,
+      ...persistentOptions
+    } = options;
     this.store.put("crawl-options", "current", persistentOptions);
-    this.store.event("crawl.effective_limits", "pipeline", Object.fromEntries(limitKeys.map(key => [key, options[key]])), this.store.currentRun().run_id);
+    this.store.event(
+      "crawl.effective_limits",
+      "pipeline",
+      Object.fromEntries(limitKeys.map((key) => [key, options[key]])),
+      this.store.currentRun().run_id,
+    );
     const result = await crawlSite(options);
     const artifact = this.save("crawl-result.json", result);
     this.save("url-inventory.json", result.entries);
@@ -233,25 +293,43 @@ export class Pipeline {
     }
     return { status: "COMPLETE", artifact };
   }
-  async validateSourceAccess(crawl = this.latest<CrawlResult>("crawl-result.json")) {
+  async validateSourceAccess(
+    crawl = this.latest<CrawlResult>("crawl-result.json"),
+  ) {
     this.assertOwnership();
     if (crawl.value.state !== "COMPLETE") {
       this.store.setRunStatus("PAUSED");
       this.report();
-      throw new UpgradeError("Crawl incomplete; resume discovery before extraction or build", 3);
+      throw new UpgradeError(
+        "Crawl incomplete; resume discovery before extraction or build",
+        3,
+      );
     }
     await verifyCrawlSnapshots(crawl.value);
     try {
       await assertNoStoredAccessChallenge(crawl.value);
     } catch (error) {
-      if (!(error instanceof CrawlError) || !["ACCESS_REQUIRED", "STORED_ACCESS_CHALLENGE", "ACCESS_REVALIDATION_REQUIRED"].includes(error.code)) throw error;
+      if (
+        !(error instanceof CrawlError) ||
+        ![
+          "ACCESS_REQUIRED",
+          "STORED_ACCESS_CHALLENGE",
+          "ACCESS_REVALIDATION_REQUIRED",
+        ].includes(error.code)
+      )
+        throw error;
       this.save("source-access-error.json", {
         source_artifact_id: crawl.artifact.artifact_id,
-        code: error.code, reason: error.message, recorded_at: new Date().toISOString(),
+        code: error.code,
+        reason: error.message,
+        recorded_at: new Date().toISOString(),
       });
       this.store.setRunStatus("PAUSED");
       this.report();
-      throw new UpgradeError(`${error.message}; resume and crawl to record/revalidate source access before extraction`, 3);
+      throw new UpgradeError(
+        `${error.message}; resume and crawl to record/revalidate source access before extraction`,
+        3,
+      );
     }
   }
   async extract() {
@@ -351,6 +429,7 @@ export class Pipeline {
       entities: model.value.entities,
       routes: routes.value.routes,
       assets: model.value.assets,
+      commerce: model.value.commerce,
       assetRoot: inside(this.store.root, "source"),
       designTokens: tokens.value,
     });
@@ -386,6 +465,25 @@ export class Pipeline {
     return built;
   }
   async import(dryRun: boolean) {
+    if (nativeConfiguration(this.store)) {
+      const guard = () =>
+        nativeGuard(this.store, () => this.assertOwnership(true));
+      const handoff = await prepareNativeHandoff(
+        this.store,
+        dryRun ? "dry-run" : "apply",
+        guard,
+      );
+      const result = handoff;
+      this.store.publishArtifact(
+        "native-import-coordination.json",
+        JSON.stringify(result, null, 2) + "\n",
+        null,
+        undefined,
+        undefined,
+        guard,
+      );
+      return result;
+    }
     const release = this.latest("release-manifest.json").value;
     const manifest = await validateBitrixPackage(
       release.package_dir,
@@ -425,6 +523,23 @@ export class Pipeline {
     return report;
   }
   async verify() {
+    if (nativeConfiguration(this.store)) {
+      const guard = () =>
+        nativeGuard(this.store, () => this.assertOwnership(true));
+      const handoff = await prepareNativeHandoff(
+        this.store,
+        "reconcile",
+        guard,
+      );
+      return {
+        status: "NATIVE_RECONCILIATION_HANDOFF",
+        handoff,
+        native: handoff.native,
+        activation: "NOT_RUN",
+        full_qa: "NOT_RUN",
+        readiness: "NOT_READY",
+      };
+    }
     this.phase("VERIFYING");
     const scope = this.latest("scope-manifest.json"),
       routes = this.latest("route-manifest.json"),
@@ -452,6 +567,21 @@ export class Pipeline {
     return report;
   }
   async run() {
+    if (nativeConfiguration(this.store)) {
+      return this.locked(
+        async () => {
+          const handoff = await this.import(false);
+          if (!("native" in handoff))
+            throw new UpgradeError(
+              "Native configuration changed during run",
+              3,
+            );
+          const state = handoff.native;
+          return { ...state, handoff };
+        },
+        { maintenance: true },
+      );
+    }
     return this.locked(async () => {
       let crawl;
       try {

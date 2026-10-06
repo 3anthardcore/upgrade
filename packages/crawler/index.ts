@@ -1,12 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import {
-  mkdir,
-  readFile,
-  writeFile,
-  rename,
-  open,
-  unlink,
-} from "node:fs/promises";
+import { mkdir, readFile, open, unlink } from "node:fs/promises";
 import path from "node:path";
 import { load } from "cheerio";
 import { CrawlError, identifyUrl, safeFetch } from "./network.ts";
@@ -14,6 +7,7 @@ import type { HttpResponse } from "./network.ts";
 import { parseRobots, robotsAllows } from "./robots.ts";
 import type { RobotsPolicy } from "./robots.ts";
 import { detectAccessChallenge, isHtmlResponse } from "./access.ts";
+import { CrawlPersistence } from "./persistence.ts";
 import type {
   AccessBlock,
   AccessChallenge,
@@ -167,7 +161,10 @@ export function inspectHtml(html: string, base: string) {
     links = new Set<string>(),
     media = new Set<string>();
   const resolveUrl = (value: string | undefined) => {
-    if (!value?.trim() || /^(?:data|javascript|mailto|tel|blob):/i.test(value.trim()))
+    if (
+      !value?.trim() ||
+      /^(?:data|javascript|mailto|tel|blob):/i.test(value.trim())
+    )
       return undefined;
     try {
       return identifyUrl(value.trim(), base).raw_url;
@@ -243,7 +240,21 @@ async function snapshot(
   const hash = digest(body),
     filename = path.join(directory, "snapshots", `${hash}.bin`);
   try {
-    await writeFile(filename, body, { flag: "wx", mode: 0o600 });
+    const file = await open(filename, "wx", 0o600);
+    try {
+      await file.writeFile(body);
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+    if (process.platform !== "win32") {
+      const directoryHandle = await open(path.dirname(filename), "r");
+      try {
+        await directoryHandle.sync();
+      } finally {
+        await directoryHandle.close();
+      }
+    }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     if (digest(await readFile(filename)) !== hash)
@@ -357,9 +368,12 @@ export async function crawlSite(options: CrawlOptions): Promise<CrawlResult> {
     lock = await open(lockPath, "wx", 0o600);
   }
   await lock.writeFile(String(process.pid));
+  let persistence: CrawlPersistence | undefined;
   try {
-    return await runCrawl(options, source, outputDir);
+    persistence = await CrawlPersistence.load(outputDir);
+    return await runCrawl(options, source, outputDir, persistence);
   } finally {
+    await persistence?.close();
     await lock.close();
     await unlink(lockPath).catch(() => undefined);
   }
@@ -369,8 +383,8 @@ async function runCrawl(
   options: CrawlOptions,
   source: ReturnType<typeof identifyUrl>,
   outputDir: string,
+  persistence: CrawlPersistence,
 ): Promise<CrawlResult> {
-  const statePath = path.join(outputDir, "crawl.json");
   const policy = {
     mode: options.mode ?? ("http" as "http" | "browser"),
     respect_robots: options.respectRobots ?? true,
@@ -378,15 +392,12 @@ async function runCrawl(
     fixture_origins: [...(options.fixtureOrigins ?? [])].sort(),
   };
   let state: CrawlResult;
+  const relocated =
+    persistence.state !== undefined &&
+    persistence.state.output_dir !== outputDir;
   let requiresRobotsRevalidation = false;
-  let storedState: string | undefined;
-  try {
-    storedState = await readFile(statePath, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-  if (storedState !== undefined) {
-    state = JSON.parse(storedState);
+  if (persistence.state !== undefined) {
+    state = persistence.state;
     if (
       state.schema_version !== 1 ||
       state.project_id !== (options.projectId ?? "fixture") ||
@@ -465,8 +476,30 @@ async function runCrawl(
     throw new Error("requestsPerSecond must be between 0 and 100");
   if ((options.maxRetries ?? 2) < 0 || (options.maxRetries ?? 2) > 5)
     throw new Error("maxRetries must be 0..5");
+  state = persistence.attach(state);
+  // A restore rewrites all physical snapshot paths. Persist that derived relocation
+  // as one checkpoint, rather than an oversized WAL row or an old-path authority.
+  if (relocated) await persistence.checkpoint();
+  const entriesByKey = new Map(state.entries.map((e) => [e.crawl_key, e])),
+    assetsByKey = new Map(state.assets.map((a) => [a.source_url, a])),
+    limitations = new Set(state.limitations),
+    statuses = state.entries.map((e) => e.status),
+    statusCounts = new Map<CrawlStatus, number>();
+  if (
+    entriesByKey.size !== state.entries.length ||
+    assetsByKey.size !== state.assets.length
+  )
+    throw new CrawlError(
+      "CRAWL_REGISTRY_CORRUPT",
+      "Duplicate persisted URL identity",
+    );
+  for (const status of statuses)
+    statusCounts.set(status, (statusCounts.get(status) ?? 0) + 1);
   const addLimitation = (message: string) => {
-    if (!state.limitations.includes(message)) state.limitations.push(message);
+    if (!limitations.has(message)) {
+      limitations.add(message);
+      state.limitations.push(message);
+    }
   };
   const addPage = (raw: string, discoveredFrom: string) => {
     let identity;
@@ -483,9 +516,7 @@ async function runCrawl(
       addLimitation(
         `Hash route requires an explicit browser route contract: ${identity.raw_url}`,
       );
-    const existing = state.entries.find(
-      (entry) => entry.crawl_key === identity.crawl_key,
-    );
+    const existing = entriesByKey.get(identity.crawl_key);
     if (existing) {
       if (!existing.discovered_from.includes(discoveredFrom))
         existing.discovered_from.push(discoveredFrom);
@@ -503,21 +534,35 @@ async function runCrawl(
       structured_data: [],
       attempts: 0,
     });
+    entriesByKey.set(
+      identity.crawl_key,
+      state.entries[state.entries.length - 1],
+    );
   };
   addPage(source.raw_url, "seed");
   let saveTail: Promise<unknown> = Promise.resolve();
-  const save = (): Promise<void> => {
+  const save = (settle = false, durable = false): Promise<void> => {
     const pending = saveTail.then(async () => {
+      for (const index of persistence.changedEntries) {
+        const before = statuses[index],
+          after = state.entries[index].status;
+        if (before === after) continue;
+        if (before)
+          statusCounts.set(before, (statusCounts.get(before) ?? 0) - 1);
+        statusCounts.set(after, (statusCounts.get(after) ?? 0) + 1);
+        statuses[index] = after;
+      }
       state.completeness = {
         basis: "discovered-source-registry",
         confidence: "bounded",
-        queued: state.entries.filter(
-          (e) => e.status === "DISCOVERED" || e.status === "RATE_LIMITED",
-        ).length,
-        excluded: state.entries.filter((e) => e.status === "EXCLUDED").length,
-        failed: state.entries.filter((e) =>
-          ["FAILED", "UNREACHABLE", "REQUIRES_ACCESS"].includes(e.status),
-        ).length,
+        queued:
+          (statusCounts.get("DISCOVERED") ?? 0) +
+          (statusCounts.get("RATE_LIMITED") ?? 0),
+        excluded: statusCounts.get("EXCLUDED") ?? 0,
+        failed: ["FAILED", "UNREACHABLE", "REQUIRES_ACCESS"].reduce(
+          (sum, s) => sum + (statusCounts.get(s as CrawlStatus) ?? 0),
+          0,
+        ),
         unverified_sources: [
           ...state.discovery.sitemap_failed,
           ...(policy.mode === "http" ? ["JavaScript-rendered DOM"] : []),
@@ -525,15 +570,22 @@ async function runCrawl(
           "Unknown unlinked URLs",
         ],
       };
-      await writeFile(`${statePath}.tmp`, JSON.stringify(state, null, 2), {
-        mode: 0o600,
-      });
-      await rename(`${statePath}.tmp`, statePath);
+      await persistence.flush(settle, durable);
     });
     saveTail = pending.catch(() => undefined);
     return pending;
   };
   state.access ??= { version: 1, blocks: [] };
+  if (persistence.pending) {
+    state.state = "PAUSED";
+    delete state.finished_at;
+    addLimitation(
+      `REQUEST_OUTCOME_UNKNOWN: persisted request(s) ${persistence.pending.first_request}..${persistence.pending.last_request} at ${persistence.pending.first_url}; budget retained, automatic re-fetch prohibited; preserve this snapshot for operator reconciliation`,
+    );
+    await save();
+    await persistence.project();
+    return persistence.state!;
+  }
   const clearExtractedContent = (entry: CrawlEntry) => {
     for (const key of [
       "title",
@@ -590,9 +642,7 @@ async function runCrawl(
       }
     } else {
       // A controlling robots/sitemap request is evidence for its own URL, never a homepage response.
-      const seed = state.entries.find(
-        (item) => item.crawl_key === source.crawl_key,
-      );
+      const seed = entriesByKey.get(source.crawl_key);
       if (seed?.status === "DISCOVERED") {
         seed.reason = `${match.reason} at ${url}; block ${id}`;
         seed.rule = "ACCESS_REQUIRED";
@@ -601,7 +651,7 @@ async function runCrawl(
     addLimitation(
       `ACCESS_REQUIRED: ${url}; explicit accessResume acknowledgement is required; source defenses are not bypassed`,
     );
-    await save();
+    await save(true);
     throw new CrawlError(
       "ACCESS_REQUIRED",
       `Access block ${id} at ${url}: ${match.reason}`,
@@ -663,9 +713,7 @@ async function runCrawl(
     };
     delete state.access.active_block_id;
     if (active.source_entry_url) {
-      const entry = state.entries.find(
-        (item) => item.crawl_key === active.source_entry_url,
-      );
+      const entry = entriesByKey.get(active.source_entry_url);
       if (entry?.status === "REQUIRES_ACCESS") {
         entry.status = "DISCOVERED";
         clearExtractedContent(entry);
@@ -673,9 +721,7 @@ async function runCrawl(
         delete entry.rule;
       }
     } else {
-      const seed = state.entries.find(
-        (item) => item.crawl_key === source.crawl_key,
-      );
+      const seed = entriesByKey.get(source.crawl_key);
       if (seed?.status === "DISCOVERED" && seed.rule === "ACCESS_REQUIRED") {
         delete seed.reason;
         delete seed.rule;
@@ -686,7 +732,8 @@ async function runCrawl(
   } else if (state.access.active_block_id) {
     state.state = "PAUSED";
     await save();
-    return state;
+    await persistence.project();
+    return persistence.state!;
   }
   let lastRequestAt = 0;
   const checkBudget = () => {
@@ -723,9 +770,10 @@ async function runCrawl(
     );
     state.counters.requests++;
     state.counters.bytes += reservedBytes;
+    persistence.reserve(url, state.counters.requests);
     // Reserve requests and worst-case response bytes durably before external I/O. A crash or unknown outcome
     // keeps the conservative reservation; neither retry nor process loss resets consumption.
-    await save();
+    await save(false, true);
     lastRequestAt = Date.now();
     const result = await safeFetch(url, {
       allowedOrigins: [source.origin],
@@ -825,11 +873,19 @@ async function runCrawl(
       if (
         [401, 403, 429, 503].includes(response.status) ||
         response.status >= 500
-      )
+      ) {
+        // This is a fully observed response, not an unknown network outcome.
+        // Persist the reason before settling its reservation; a later explicit
+        // crawl can observe the policy again under the unchanged budget.
+        addLimitation(
+          `ROBOTS_UNAVAILABLE: robots.txt HTTP ${response.status}; crawl is paused conservatively`,
+        );
+        await save(true);
         throw new CrawlError(
           "ROBOTS_UNAVAILABLE",
           `robots.txt HTTP ${response.status}; crawl is paused conservatively`,
         );
+      }
       state.discovery.robots =
         response.status === 200
           ? parseRobots(response.body.toString("utf8"))
@@ -850,7 +906,7 @@ async function runCrawl(
           addLimitation(`Invalid sitemap reference: ${sitemap}`);
         }
       }
-      await save();
+      await save(true);
     }
     while (state.discovery.sitemap_queue.length) {
       const url = state.discovery.sitemap_queue[0];
@@ -895,7 +951,7 @@ async function runCrawl(
       }
       state.discovery.sitemap_done.push(url);
       state.discovery.sitemap_queue.shift();
-      await save();
+      await save(true);
     }
     for (let index = 0; index < state.entries.length; index++) {
       const entry = state.entries[index];
@@ -914,7 +970,7 @@ async function runCrawl(
         entry.status = "EXCLUDED";
         entry.reason = "robots.txt disallow";
         entry.rule = "robots";
-        await save();
+        await save(true);
         continue;
       }
       if (entry.attempts > (options.maxRetries ?? 2)) {
@@ -944,7 +1000,7 @@ async function runCrawl(
         if ([429, 503].includes(response.status)) {
           entry.status = "RATE_LIMITED";
           entry.reason = `HTTP ${response.status}`;
-          await save();
+          await save(true);
           if (entry.attempts > (options.maxRetries ?? 2))
             throw new CrawlError(
               "HOST_PAUSED",
@@ -1024,18 +1080,21 @@ async function runCrawl(
             }
             for (const url of entry.media) {
               const id = identifyUrl(url, response.url),
-                existing = state.assets.find(
-                  (asset) => asset.source_url === id.crawl_key,
-                );
+                existing = assetsByKey.get(id.crawl_key);
               if (existing) {
                 if (!existing.discovered_from.includes(entry.crawl_key))
                   existing.discovered_from.push(entry.crawl_key);
-              } else
+              } else {
                 state.assets.push({
                   source_url: id.crawl_key,
                   discovered_from: [entry.crawl_key],
                   status: "DISCOVERED",
                 });
+                assetsByKey.set(
+                  id.crawl_key,
+                  state.assets[state.assets.length - 1],
+                );
+              }
             }
           }
         }
@@ -1063,7 +1122,7 @@ async function runCrawl(
         entry.reason = errorText(error);
         entry.rule = error instanceof CrawlError ? error.code : "fetch-error";
       }
-      await save();
+      await save(true);
     }
     let processedAssets = state.assets.filter(
       (item) => item.status !== "DISCOVERED",
@@ -1081,7 +1140,7 @@ async function runCrawl(
       if (identity.origin !== source.origin) {
         asset.status = "EXCLUDED";
         asset.reason = "External resource origin not approved";
-        await save();
+        await save(true);
         continue;
       }
       if (
@@ -1090,7 +1149,7 @@ async function runCrawl(
       ) {
         asset.status = "EXCLUDED";
         asset.reason = "robots.txt disallow";
-        await save();
+        await save(true);
         continue;
       }
       try {
@@ -1135,7 +1194,7 @@ async function runCrawl(
         asset.status = "FAILED";
         asset.reason = errorText(error);
       }
-      await save();
+      await save(true);
     }
     state.state = "COMPLETE";
     state.finished_at = new Date().toISOString();
@@ -1162,5 +1221,6 @@ async function runCrawl(
     );
   }
   await save();
-  return state;
+  await persistence.project();
+  return persistence.state!;
 }

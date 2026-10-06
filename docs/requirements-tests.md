@@ -1,5 +1,29 @@
 # Матрица требований и фактических проверок
 
+Контрольная точка **30.09, 10:05 UTC**: AT15/27 r18 app deployment EXIT0, реальный `native configure` EXIT0; `native prepare --action apply` IN_PROGRESS, licensed handoff execution NOT_RUN. AT20/28 current restore процесс3271034 подтверждён живым, итоговый result отсутствует: IN_PROGRESS. App release не меняет установленный CMS stage389/r15 и не доказывает activation/full QA. Catalog25/25 и runtime-evidence40/40 — авторские targeted результаты, ещё не независимая приёмка или native PASS. Следующие обязательные проверки: завершение restore, root review модулей, exact-request handoff/reconcile/replay.
+
+Контрольная точка **30.09, 09:47 UTC**: AT07/08 ordinary extractor V2 ACCEPT7+5independent/81regression; AT15/27 handoff V2 ACCEPT root unchanged4/4, INVALID artifact admission запрещён. Isolated r18 candidate checkPASS/local498/498/E2E28/28,0SKIP; native deployment NOT_RUN. §23 scale: controlled crawl250/1250 PASS29.464s, полный10000/50000/full pipeline/Bitrix NOT_RUN. AT20/28 current restore IN_PROGRESS, не PASS. Непринятые catalog/evidence/persistence drafts исключены из candidate.
+
+Контрольная точка **30.09, 09:32 UTC**: AT20/28 current restore V2 code review ACCEPT, root11/11 Windows+11/11 WSL, native plan EXIT0/execute IN_PROGRESS (не restore PASS). AT17/28 admission V2 root31/31 actual PHP PASS, native NOT_RUN. AT07/08 commerce ordinary V2 bridge root81/81 PASS0SKIP и unchanged independent probes7/7; V1 REJECT сохранён, V2 reviewer ещё работает. AT15/27 native handoff V1 author27/27/privilege boundary PASS, root review REJECT1PASS3FAIL: INVALID metadata не должна разрешать экспорт native request. В процессе исправления; native bridge ещё NOT_RUN. r17 остаётся текущей установленной версией; окончательная готовность не присвоена.
+
+Контрольная точка **30.09, 08:55 UTC**: AT20/28 current backup **INTEGRITY_VERIFIED**, 160598tree entries/4092865871raw bytes, source runtime restored, retained receipt GET×2 stable11907bytes/session unchanged. Это ещё не restore PASS. AT23 native QA CLI ingest/replay EXIT0, same id/artifact, status NOT_READY; r17 actual deployment EXIT0. AT15/28 независимые probes выявили file-admission4999→5001 и restore rejection штатного vendor PHPSESSID, исправления ожидаются, исходные отрицательные результаты сохраняются. Измеренный p951861ms относится к динамическому no-store, не к кешированному ориентиру. Полный r17 local450/450 и E2E25/25 остаётся последним принятым набором; агентские drafts в него не входят.
+
+Контрольная точка **30.09, 08:32 UTC**: AT15/17/19/21 — новый reusable browser verifier на HTTPS/настоящем Битрикс:205requests/responses/intercepts/transport,0blocked,4syntheticPOST,45viewportshots/14boundedchecks PASS; factual readback389rows и DBcounts неизменны,orders/events0. AT23 — QA validatorV2 теперь отвергает все7 независимых inconsistentreceipt cases; genuinebaseline/cartvariation PASS,14unit и3cache/lease независимых PASS. R17candidate450/450local0SKIP+25/25E2E0SKIP+checkPASS. Первый candidate-run447PASS/3SKIP сохранён: изолированному staging не хватало трёх ignored real-source diagnostics; после копирования неизменённых privatefixturebytes повтор450/450PASS. AT20/28 currentbackup EXECUTING, currentprivatestate restore NOT_RUN. P951861ms и577uncoveredtargets остаются отклонениями, **NOT_READY**.
+
+Контрольная точка **30.09, 08:21 UTC**: AT17/19 — заголовки389 страниц PASS; AT23 — HTTP measurement отдельно сообщает невыполненный p95<1s (фактически1861.134ms,10clients/120samples), не повышает readiness. AT03/06/23 — exact link closure PARTIAL:6532 ссылочных вхождения,4299 вне текущих маршрутов,577 уникальных назначений;389 HTTP200 не доказывают полную навигацию. AT10/21/28 — новый browser verifier15/15 actual PHP/Chromium PASS после root-repeat, native запуск INCOMPLETE до0requests из-за отсутствующей runtime revision, не PASS. AT20/28 — backup fail-closed после nested EIO подтверждён независимыми8/8 Windows+WSL; автор42/42 на обеих платформах; настоящая current backup/restore ещё NOT_RUN. QA normalizer REJECT attempt1: семь несогласованных copied receipts ошибочно принимались, исправление проходит review. **NOT_READY**, полные исторические419local/25E2E не заменяются частичными targeted наборами. [Команды и факты](pilots/completion-20260930.md).
+
+Контрольная точка **30.09, 07:44 UTC**: AT16 частично закрыт настоящим API-edit→HTTP→import-conflict→restore→HTTP→reconcile389/defects0; browser admin editing отдельно NOT_RUN. AT10/15/20/28: actual PHP process restart сохраняет private session/receipts; это не current-state disaster restore. AT17/19: повторный native neutral-context и firewall guard PASS, users1/orders0/events0. AT23: native import evidence COMMITTED с привязкой package/build/model/scope; полный CLI ingest/replay EXIT0. Независимый stage389 review и root-repeat169/169 offline assertions PASS (не169 native сценариев). App r16, `npm test`419/419, `npm run check` PASS; прежний E2E25/25 остаётся последним полным браузерным набором. Новый measurement helper:10 Python assertions PASS, native запуск пока NOT_RUN. Полнота источника UNKNOWN/2742known/389selected, PDF299 и оставшиеся AT сохраняются. **NOT_READY**. [Доказательства](pilots/completion-20260930.md).
+
+Контрольная точка **30.09, 07:10 UTC**: AT10/14/15 — настоящий stage389 apply/reconcile/replay/facts PASS; created286/updated1/skipped102, routes389, defects0, legacy ID1. AT03/06/14 — HTTPS389 маршрутов и2345 assets PASS. AT17/19/21 — synthetic HTTP29 requests/13checks PASS, native JS-disabled Chromium40перехватов/44ответа/10checks PASS; product/cart/receipt/lead/search/empty при360/390/768/1024/1440 без overflow. Native counts и389 facts после HTTP не изменились, users1/orders0/events0. AT20/28 — actual V6 isolated restore исторического r12/103 PASS; production и поздний private demo-state restore NOT_RUN. AT16 native edit ещё выполняется; AT23 общий report ещё не содержит новые receipts. Local413/413, E2E25/25 PASS0SKIP. Source registry2742/PDF299/full UNKNOWN сохраняются; **NOT_READY**. [Доказательства и следующий шаг](pilots/completion-20260930.md).
+
+Контрольная точка **30.09, 06:32 UTC**: AT15/27 — native v7 ingestion восстановлен до COMMITTED, replay вернул тот же3346-file artifact без дублей. AT01/10/23 — v8-stage389 страниц с mandatory-missing0, сохранённый registry2742, full source UNKNOWN; ingest/model/build EXIT0, CMS ещё r12/103. AT17/28 — новый pre-bootstrap transport независимо принят локально (20 HTTP cases), native NOT_RUN. AT28 — restore V4 FAILED на занятой подсети до старта DB; V5 выполняется в новой свободной подсети/каталоге. Общие local375/375 и E2E25/25 PASS,0SKIP; check PASS. [Команды, pins, результаты и следующий шаг](pilots/completion-20260930.md). Это текущий срез; контрольные точки ниже — история.
+
+Контрольная точка **30.09, 05:51 UTC**: AT01/10/23/27 — v8 DOM948, registry2742, ordinary queue0 при review1935; UNKNOWN сохраняется. Исправление registry: 47 независимых tests PASS. AT15/27 — native ingest FAILED/PENDING из-за lease, исправление 9 targeted PASS, независимая проверка продолжается. AT28 — native restore V2 FAILED на static DB host; V3 local36 PASS, native NOT_RUN. `npm test`373/373 PASS0SKIP; E2E24/25, исправленная выдача BLOCKED targeted1/1 PASS, полный повтор продолжается. CMS r12/103, PARTIAL / NOT_READY. [Команды, факты и следующий шаг](pilots/completion-20260930.md).
+
+Контрольная точка **30.09, 05:30 UTC**: `npm test` 362/362 PASS, `npm run test:e2e` 23/23 PASS, check PASS; PHP задан явно, SKIP=0. Commerce V3 / DemoEngine26 / DemoWeb24 / View8 / runtime accepted locally; это PARTIAL по AT-09/15/17/28, native HTTP ещё не проверен. Guard24 и recovery30+independent10/race PASS относятся к локальной политике/контрактам. Native восстановление запущено и ожидает отдельного результата. Полный v7 source registry2737/DOM932 остаётся UNKNOWN; 299 PDF недоступны для проверенного файлового переноса. Staged capture с потерей derived denominator остановлен до импорта. Подробности/команды/следующий шаг: [актуальная точка](pilots/completion-20260930.md). Исторические результаты ниже не заменяют эти границы.
+
+Обновление 30.09: [контрольная точка](pilots/completion-20260930.md). AT01/10/23/27: offline queue12/12 PASS с сохранением unresolved/query/provenance. AT07/08/17/28: pure PHP demo engine18/18 independently PASS; HTTP-интеграция NOT_RUN. AT15/27: native CLI9/9 PASS, включая actual process death/reconcile-first; новая версия native Bitrix NOT_RUN. Commerce v1/v2 REJECT по противоречивым ценам, исправление проходит следующую независимую проверку. DEMO_READY не установлен.
+
 Дата: 29 сентября 2026. PASS означает только описанный проверенный сценарий. PARTIAL означает работающую проверенную часть при неполном AT. NOT_RUN означает отсутствие соответствующего фактического запуска. Fixture target, сборка пакета и PHP lint не являются настоящим Битрикс.
 
 Последний полный запуск: `npm run check` — PASS; `npm test` — **51 PASS, 0 FAIL, 0 SKIP**; `npm run test:e2e` — **2 PASS, 0 FAIL, 0 SKIP**. Заданы абсолютные `UPGRADE_PHP_BIN` и `UPGRADE_PHP_EXT_DIR` для PHP 8.3.35. Логи: `var/evidence/tests-final.txt`, `var/evidence/e2e-final.txt`. `npm run test:agents` отдельно дал AT-22 PASS. Результаты этапов и ограничения фиксируются в [PROGRESS.md](PROGRESS.md).
@@ -109,3 +133,45 @@ AT01/10/13/23/27: ALL_OBSERVED сохраняет весь исходный ре
 | Backup/recovery | Fresh SQL/files checksum/gzip/listing + предыдущий Upgrade state restore | Backup integrityPASS; настоящий SQLrestoreNOT_RUN |
 
 Команды: `npm run check` PASS; `npm test`257PASS; `npm run test:e2e`23PASS,0SKIP; `operator build --all-observed`; native PHP `dry-run`, `claim`, `apply`, `reconcile`, repeat`apply`; `scripts/verify-pilot-http.py`; `scripts/verify-pilot-bitrix.php`. Evidence `var/evidence/catalog-stage/*r12-final.txt`, `var/evidence/server-r12`, `docs/reviews/catalog-target-r12.md`. Общий статус **NOT_READY**: incomplete source, commerce/search, license activation, native admin editing, SQL restore остаются открытыми.
+
+| HTML design preview (30.09) | node demos/design-v1/verify.mjs: filter/search/product/cart add-remove/390px overflow/images/JS | PASS ограниченного HTML-демо; native Bitrix/design migration NOT_RUN |
+
+| Новый stage1 preflight | node stage1-design/preflight.mjs | API_CONFIGURATION_REQUIRED; actual image generation NOT_RUN; приёмка отдельно docs/stage1/PROGRESS.md |
+
+| Stage1 UI/UX repository | pinned installer + node stage1-design/design-guidance.mjs query | PASS local search; runtime service NOT_RUN |
+
+| Stage1 Studio запуск 01.10 | Серверные smoke.mjs, behavior-test.mjs, edit-smoke.mjs, final-smoke.mjs; реальный restart | Ограниченный PASS: UI→PNG, edit/history, download hash, mobile, auth/CSRF/idempotency/private-IP, persistence; полная приёмка NOT_RUN. См. stage1/LAUNCH.md |
+| Регрессия 01.10 | npm run check; npm test; npm run test:e2e | check PASS;406PASS/178SKIP/0FAIL;27PASS/1SKIP/0FAIL. SKIP не PASS; не новая интеграционная проверка Битрикс |
+
+| HyperUI renderer | Server render-test.mjs | 4PASS: escaping/injection, sparse source, bounded style, actual browser/no-network/mobile/immutable files |
+| HTML UI и версии | live-test.mjs, version-test.mjs, final-test.mjs | PASS ограниченного сценария: fresh source→HTML/PNG, preview/download SHA, keyboard disclosure, owner/auth, hash navigation, old PNG editor;0paid calls |
+| HTML persistence/capture | acceptance-setup.mjs, restart-test.py | PASS: idempotency, fresh10DOM paragraphs/8images, actual restart preserves state; crash-during-write NOT_RUN |
+| Regression after HyperUI | npm run check; npm test; npm run test:e2e | PASS;406PASS/178SKIP/0FAIL;27PASS/1SKIP/0FAIL. Полная HTML/Bitrix приёмка не установлена |
+
+| Astra replaces GPT-4.1 in Stage1 analysis/review | model-config.mjs + app.mjs | Real analysis/review HTTP200, completed and JSON contracts; syntax; restart retains 6 jobs/call counts | PASS; full new PNG UI run NOT_RUN; see stage1/ASTRA.md |
+
+
+| Full new Astra design run | 44620572-78a9-479e-89d2-0e23da13b569 | Authenticated submission, fresh analysis, generation dispatched | RUNNING; final visual QA PENDING |
+
+| Automatic JS capture fallback | source-capture/worker/browser + browser-network | 5 actual Node/browser tests PASS; isolated cookies, GET-only and private IP guard; restart 8 jobs preserved | teplypol-market.ru remains blocked by KillBot; live job pending; see stage1/BROWSER_FALLBACK.md |
+
+| Protected source through real queue | 104983a1-1292-4a83-aaad-7d0998594580 | Automatic browser failure returned clearly, 0 AI calls | Handling PASS; source access BLOCKED, design NOT_RUN |
+
+| Existing regression suite after browser change | npm run check; npm test; npm run test:e2e; isolated codex.test.ts | Check PASS; E2E27/1skip; suite405/178skip/1timeout; isolated retry3PASS | Full suite not all PASS; see stage1/BROWSER_FALLBACK.md |
+
+## 2026-10-02 local source capture evidence
+- Source provenance/raw snapshots: 30 timestamped JSON DOM exports, PASS (browser-assisted; no raw HTML claim).
+- Scope accounting: 793 observed URLs, 628 unique product URLs, 20 listing pages; full-site completeness PARTIAL. Product details 3/628.
+- Saved assets: 154; four failed downloads recorded as limitation.
+- Integrity/reproducibility: scripts/package-teplypol-capture.py, 190 SHA256 checks, exact-URL uniqueness, listing/detail count assertions and ZIP integrity PASS.
+- Server autonomous capture, Bitrix import and design generation: NOT_RUN in this stage. Existing server challenge remains unresolved.
+- Artifact: var/pilots/teplypol-local-20261002/report.html and sibling ZIP. Next: validated ingestion or additional product detail capture.
+
+## 2026-10-04 HTML catalog regression
+- Same-origin category/image/name associations, original paths, nested-product filtering, missing-catalog rejection: catalog-test.mjs PASS (3 tests).
+- Duplicate headings, category loss and absent category images reject: PASS within catalog-test.mjs.
+- Safe escaped rendering, immutable output, desktop/mobile layout, blocked external requests: render-test.mjs PASS (4 tests).
+- Fresh live SnabMetal pipeline: 15 category cards, 15 loaded images, no mobile overflow, ready Studio result; var/design-fix-remote/verification.json PASS.
+- Capture security suite: initial invocations failed due environment/runtime mismatch, not a successful regression run. General aesthetic quality is not proven by these structural checks; supported image-linked layouts only.
+
+Capture regression follow-up 2026-10-04: correct service runtime/environment => browser-test.mjs 5 PASS/0 FAIL, exit0; evidence var/design-fix-remote/security-tests.log. This supersedes environment-blocked attempts above.

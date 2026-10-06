@@ -8,7 +8,9 @@ import {
 import { resolve } from "node:path";
 import { Store, hash, inside } from "../core/index.ts";
 import { defaultTokens } from "../core/design.ts";
-import type { Artifact } from "../contracts/index.ts";
+import { readTargetEvidence } from "../core/target-evidence.ts";
+import { readNativeQaEvidence } from "../core/native-qa-evidence.ts";
+import type { Artifact, Project, Run } from "../contracts/index.ts";
 import type { CaptureReceipt } from "../core/operator-capture.ts";
 import { Ajv } from "ajv";
 import { identifyUrl, inspectHtml } from "../crawler/index.ts";
@@ -43,9 +45,31 @@ const same = (a: unknown, b: unknown) =>
 function requireEvidence(ok: unknown, message: string): asserts ok {
   if (!ok) throw new Error(message);
 }
+// One report is a bounded validated snapshot. Never carry byte/DOM caches to another report.
+type ReportContext = {
+  artifacts: Map<string, Artifact>;
+  projectId: string;
+  bytes: Map<string, { artifact: Artifact; bytes: Buffer }>;
+  byteCount: number;
+  links: Map<string, string[]>;
+  linkCount: number;
+};
+const reportContexts = new WeakMap<Store, ReportContext>();
 // Re-read the exact validated bytes; rendering never reads the mutable capture directory.
 function evidenceBytes(store: Store, id: string, expectedType?: string) {
-  const meta = store.get<Artifact>("artifact", id);
+  const context = reportContexts.get(store);
+  const meta =
+    context?.artifacts.get(id) ?? store.get<Artifact>("artifact", id);
+  requireEvidence(
+    meta.artifact_id === id &&
+      meta.project_id ===
+        (context?.projectId ?? store.currentRun().project_id) &&
+      meta.validation_status === "VALID" &&
+      (!expectedType || meta.type === expectedType),
+    "Artifact identity/type/project/status mismatch",
+  );
+  const cached = context?.bytes.get(id);
+  if (cached) return cached;
   const stat = lstatSync(inside(store.root, meta.relative_path));
   requireEvidence(
     Number.isSafeInteger(meta.size_bytes) &&
@@ -56,7 +80,7 @@ function evidenceBytes(store: Store, id: string, expectedType?: string) {
       stat.size === meta.size_bytes,
     "Artifact is not a bounded independent regular file",
   );
-  const artifact = store.validateArtifact(id);
+  const artifact = meta;
   requireEvidence(
     artifact.validation_status === "VALID",
     "Artifact is not VALID",
@@ -68,9 +92,39 @@ function evidenceBytes(store: Store, id: string, expectedType?: string) {
   const bytes = readFileSync(inside(store.root, artifact.relative_path));
   requireEvidence(
     bytes.length === artifact.size_bytes && hash(bytes) === artifact.sha256,
-    "Artifact changed after validation",
+    "Artifact hash mismatch or size changed during report validation",
   );
-  return { artifact, bytes };
+  const result = { artifact, bytes };
+  if (context && bytes.length <= 8_000_000) {
+    while (
+      context.byteCount + bytes.length > 32_000_000 &&
+      context.bytes.size
+    ) {
+      const key = context.bytes.keys().next().value!;
+      context.byteCount -= context.bytes.get(key)!.bytes.length;
+      context.bytes.delete(key);
+    }
+    context.bytes.set(id, result);
+    context.byteCount += bytes.length;
+  }
+  return result;
+}
+function reportDomLinks(store: Store, bytes: Buffer, url: string): string[] {
+  const context = reportContexts.get(store),
+    key = hash(bytes) + "\0" + url,
+    prior = context?.links.get(key);
+  if (prior) return prior;
+  const links = inspectHtml(bytes.toString("utf8"), url).links;
+  if (context && links.length <= 100000) {
+    while (context.linkCount + links.length > 250000 && context.links.size) {
+      const k = context.links.keys().next().value!;
+      context.linkCount -= context.links.get(k)!.length;
+      context.links.delete(k);
+    }
+    context.links.set(key, links);
+    context.linkCount += links.length;
+  }
+  return links;
 }
 function operatorDerivedEvidence(
   store: Store,
@@ -789,10 +843,11 @@ function operatorEvidence(
           links = selected.links;
           row.observation = "SELECTED_FIELDS";
         } else {
-          links = inspectHtml(
-            bytes.toString("utf8"),
+          links = reportDomLinks(
+            store,
+            bytes,
             identifyUrl(observation.document_url).crawl_key,
-          ).links;
+          );
           row.observation = "DOM_OBSERVED";
         }
         for (const link of links) {
@@ -938,6 +993,27 @@ const markdown = (s: unknown) =>
     .replace(/[\r\n]+/g, " ");
 export function writeReport(store: Store) {
   const artifacts = store.list<Artifact>("artifact");
+  const context: ReportContext = {
+    artifacts: new Map(artifacts.map((a) => [a.artifact_id, a])),
+    projectId: store.list<any>("project")[0].project_id,
+    bytes: new Map(),
+    byteCount: 0,
+    links: new Map(),
+    linkCount: 0,
+  };
+  requireEvidence(
+    context.artifacts.size === artifacts.length,
+    "Duplicate artifact metadata identities",
+  );
+  reportContexts.set(store, context);
+  try {
+    return renderReport(store);
+  } finally {
+    reportContexts.delete(store);
+  }
+}
+function renderReport(store: Store) {
+  const artifacts = [...reportContexts.get(store)!.artifacts.values()];
   const latest = (type: string) => {
     const a = artifacts.filter((a) => a.type === type).at(-1);
     if (!a) return null;
@@ -945,7 +1021,11 @@ export function writeReport(store: Store) {
       evidenceBytes(store, a.artifact_id, type).bytes.toString("utf8"),
     );
   };
-  const status = store.getStatus();
+  // Reports consume only project/run state, not the full event log or a second artifact scan.
+  const status = {
+    project: store.list<Project>("project")[0],
+    run: store.list<Run>("run").at(-1),
+  };
   const qa = latest("qa-report.json");
   const source = latest("crawl-result.json");
   const sourceArtifact = artifacts
@@ -962,6 +1042,34 @@ export function writeReport(store: Store) {
     operator,
     status.project,
   );
+  const nativeEvidence = readTargetEvidence(
+    store,
+    new Set<string>(
+      operatorDerived.builds
+        .filter(
+          (build: any) =>
+            build.integrity === "VERIFIED" && build.state === "PARTIAL",
+        )
+        .map((build: any) => build.id),
+    ),
+  );
+  const recordedImports = nativeEvidence.filter(
+    (item) => item.state === "RECORDED_NATIVE_IMPORT",
+  );
+  const nativeQa = readNativeQaEvidence(
+    store,
+    new Set<string>(
+      operatorDerived.builds
+        .filter((b: any) => b.integrity === "VERIFIED" && b.state === "PARTIAL")
+        .map((b: any) => b.id),
+    ),
+    operatorDerived.latest_verified_build_id ?? null,
+  );
+  const currentNativeQa = nativeQa
+    .filter(
+      (q: any) => q.integrity === "VERIFIED" && q.binding_status === "CURRENT",
+    )
+    .at(-1);
   const accessError = latest("source-access-error.json");
   const persistedGuardError =
     sourceArtifact &&
@@ -1053,7 +1161,11 @@ export function writeReport(store: Store) {
         ? sourceState === "NOT_STARTED"
           ? "NOT_READY — исследование источника не начато"
           : "NOT_READY — исследование источника не завершено"
-        : "NOT_READY — интеграция Битрикс не подтверждена";
+        : currentNativeQa
+          ? "NOT_READY — записан native QA выбранного scope; полный источник неизвестен"
+          : recordedImports.length
+            ? "NOT_READY — записана сверка импорта; остальные проверки Битрикс не подтверждены"
+            : "NOT_READY — интеграция Битрикс не подтверждена";
   const sourceNextStep = accessBlocked
     ? "Получить разрешённый доступ к источнику или согласованный экспорт. После снятия ограничения продолжить исследование и проверить исходный реестр URL."
     : needsRevalidation
@@ -1064,7 +1176,11 @@ export function writeReport(store: Store) {
           : "Продолжить исследование источника с сохранённого состояния: проверить доступ, ограничения и оставшуюся очередь URL."
         : partialBuild?.package_blockers.length
           ? "Уточнить неохваченные URL и проверить полноту исходного реестра."
-          : "Настроить изолированный Битрикс и выполнить импорт, URL/контент/сценарии/админку и backup restore.";
+          : recordedImports.length
+            ? currentNativeQa
+              ? "Проверить отсутствующие native QA разделы и текущее восстановление; продолжить исследование неохваченных URL."
+              : "Проверить HTTP/URL, контент, сценарии, административную часть и восстановление независимо от записанной native сверки БД."
+            : "Настроить изолированный Битрикс и выполнить импорт, URL/контент/сценарии/админку и backup restore.";
   const operatorNextStep =
     operator.invalid_captures || operatorDerived.incomplete_outputs
       ? "Проверить ошибки и незавершённые записи операторских артефактов, восстановить их по принятым хешам до использования модели или пакета."
@@ -1073,7 +1189,13 @@ export function writeReport(store: Store) {
         : operatorDerived.latest_verified_build_id
           ? partialBuild?.package_blockers.length
             ? "Устранить блокеры частичного операторского пакета и собрать новую принятую версию. Импорт заблокирован; отсутствующие файлы и неохваченные URL не считаются перенесёнными."
-            : `Проверить изолированный импорт частичного операторского пакета и выбранные маршруты (${partialBuild?.planned_routes ?? 0}); остальные известные URL остаются неохваченными.`
+            : recordedImports.some(
+                  (item) => item.build_record_id === partialBuild?.id,
+                )
+              ? currentNativeQa
+                ? "Native QA текущей принятой сборки записан. Проверить разделы NOT_RUN и оставшийся исходный scope; текущий сайт заново не опрашивался."
+                : `Сверка native импорта этой сборки записана. Выполнить отдельные HTTP, browser, admin и restore проверки; остальные известные URL остаются неохваченными.`
+              : `Проверить изолированный импорт частичного операторского пакета и выбранные маршруты (${partialBuild?.planned_routes ?? 0}); остальные известные URL остаются неохваченными.`
           : partialModel
             ? "Собрать отдельный частичный пакет из проверенной операторской модели, сохранив неохваченные URL в scope."
             : operator.valid_captures
@@ -1120,11 +1242,61 @@ export function writeReport(store: Store) {
     operator,
     operator_derived: operatorDerived,
     target: {
-      state: qa ? "RECORDED_QA" : "NOT_RUN",
-      counts: qa?.counts ?? null,
+      state: currentNativeQa
+        ? "RECORDED_NATIVE_QA"
+        : recordedImports.length
+          ? "RECORDED_NATIVE_IMPORT"
+          : qa
+            ? "RECORDED_QA"
+            : "NOT_RUN",
+      counts:
+        currentNativeQa &&
+        "checks" in currentNativeQa &&
+        currentNativeQa.checks.counters === "RECORDED_PASS"
+          ? currentNativeQa.counts
+          : (qa?.counts ?? null),
       coverage: qa?.coverage ?? null,
-      operator_capture_import: "NOT_RUN",
-      note: "Целевые проверки относятся только к сохранённому QA-артефакту. Операторские наблюдения не являются импортом или проверкой страниц Битрикс.",
+      operator_capture_import: recordedImports.length
+        ? "RECORDED_NATIVE_IMPORT"
+        : "NOT_RUN",
+      native_import_evidence: nativeEvidence,
+      native_qa_evidence: nativeQa,
+      native_qa_target_id: currentNativeQa?.target_id ?? null,
+      native_qa_binding: currentNativeQa
+        ? "CURRENT"
+        : nativeQa.some((q: any) => q.binding_status === "STALE")
+          ? "STALE"
+          : "NOT_RUN",
+      native_qa_scope:
+        currentNativeQa && "source_scope" in currentNativeQa
+          ? currentNativeQa.source_scope
+          : null,
+      native_qa_checks:
+        currentNativeQa && "checks" in currentNativeQa
+          ? currentNativeQa.checks
+          : null,
+      internal_link_closure:
+        currentNativeQa && "internal_link_closure" in currentNativeQa
+          ? currentNativeQa.internal_link_closure
+          : { status: "NOT_VERIFIED" },
+      independent_checks: {
+        http:
+          currentNativeQa && "checks" in currentNativeQa
+            ? currentNativeQa.checks.routes
+            : "NOT_RUN",
+        browser:
+          currentNativeQa && "checks" in currentNativeQa
+            ? currentNativeQa.checks.browser
+            : "NOT_RUN",
+        admin: "NOT_RUN",
+        restore: "NOT_RUN",
+        full_source_coverage: "UNKNOWN",
+      },
+      note: currentNativeQa
+        ? "Сохранены связанные с текущей принятой сборкой копии native QA. CURRENT означает связь с Store, а не новую проверку работающего сайта. Отсутствующие проверки — NOT_RUN; историческое восстановление не подтверждает текущий пакет или приватные сессии. Полный источник UNKNOWN, готовность NOT_READY."
+        : recordedImports.length
+          ? "Записана проверенная по хешам операторская копия native сверки БД для указанных target/build/package. Это историческое свидетельство доверенного оператора; текущее назначение не опрашивалось. HTTP, браузер, администрирование, восстановление и полнота источника проверяются отдельно."
+          : "Целевые проверки относятся только к сохранённому QA-артефакту. Операторские наблюдения не являются импортом или проверкой страниц Битрикс.",
     },
     entities,
     content: {
@@ -1160,6 +1332,19 @@ export function writeReport(store: Store) {
             (value: string) => `Operator package ${build.id} warning: ${value}`,
           ),
         ]),
+        ...nativeEvidence.flatMap((item) =>
+          item.issues.map(
+            (issue: string) => `Target evidence ${item.id}: ${issue}`,
+          ),
+        ),
+        ...nativeQa.flatMap((item) =>
+          item.issues.map((issue) => `Native QA ${item.id}: ${issue}`),
+        ),
+        ...(nativeQa.length
+          ? [
+              "Native QA — копии доверенного оператора. CURRENT/STALE относится только к принятой сборке; live target не опрашивался. Browser legacy связан только операторским cohort и origin; все screenshots, admin, transport и текущий restore этим приёмом не подтверждены.",
+            ]
+          : []),
         ...(operator.captures.some((capture: any) => capture.stale_binding)
           ? [
               "Часть операторских capture привязана к прежнему снимку обхода; текущий crawl и его ограничения сохранены отдельно.",
@@ -1175,7 +1360,16 @@ export function writeReport(store: Store) {
               "Исследование источника не завершено; полнота контента и исходного реестра не подтверждена.",
             ]
           : []),
-        "Настоящий Битрикс, административная часть, production-интеграции и восстановление Битрикс: NOT_RUN.",
+        ...(recordedImports.length
+          ? [
+              "Native импорт: RECORDED_NATIVE_IMPORT только для перечисленных сборок и назначений. Копии JSON доверенного оператора не защищают от недостоверного утверждения самого оператора.",
+              currentNativeQa
+                ? "Native QA разделы перечислены отдельно; административная часть, production-интеграции и восстановление текущего пакета остаются NOT_RUN в этом отчёте."
+                : "HTTP, браузер, административная часть, production-интеграции и восстановление Битрикс: NOT_RUN.",
+            ]
+          : [
+              "Настоящий Битрикс, административная часть, production-интеграции и восстановление Битрикс: NOT_RUN.",
+            ]),
       ]),
     ],
     cost: {
@@ -1222,7 +1416,7 @@ export function writeReport(store: Store) {
   writeFileSync(resolve(dir, "index.html"), html);
   writeFileSync(
     resolve(dir, "summary.md"),
-    `# ${markdown(report.project_id)}\n\n${markdown(report.headline)}. ${markdown(report.phase)} / ${markdown(report.execution_status)}.\n\n${markdown(report.source.summary)}\n\n${markdown(report.content.note)}${operatorMarkdown}${derivedMarkdown}\n\nЦелевой сайт: ${markdown(report.target.note)}\n\nДоступ к источнику:\n${(report.source.access.blocks ?? []).map((block: unknown) => "- " + markdown(JSON.stringify(block))).join("\n") || "- Ограничения не зарегистрированы."}\n\n${markdown(report.next_step)}\n\nОграничения:\n${report.limitations.map((x) => "- " + markdown(x)).join("\n")}\n\nПродолжение: ${markdown(report.resume)}\n`,
+    `# ${markdown(report.project_id)}\n\n${markdown(report.headline)}. ${markdown(report.phase)} / ${markdown(report.execution_status)}.\n\n${markdown(report.source.summary)}\n\n${markdown(report.content.note)}${operatorMarkdown}${derivedMarkdown}\n\nЦелевой сайт: ${markdown(report.target.note)}${nativeEvidence.length ? "\n\n" + nativeEvidence.map((item) => "- " + markdown(JSON.stringify(item))).join("\n") : ""}${nativeQa.length ? "\n\nNative QA:\n" + nativeQa.map((item) => "- " + markdown(JSON.stringify(item))).join("\n") : ""}\n\nДоступ к источнику:\n${(report.source.access.blocks ?? []).map((block: unknown) => "- " + markdown(JSON.stringify(block))).join("\n") || "- Ограничения не зарегистрированы."}\n\n${markdown(report.next_step)}\n\nОграничения:\n${report.limitations.map((x) => "- " + markdown(x)).join("\n")}\n\nПродолжение: ${markdown(report.resume)}\n`,
   );
   return {
     json: resolve(dir, "report.json"),

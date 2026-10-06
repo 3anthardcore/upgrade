@@ -59,7 +59,7 @@ export interface SelectedDomObservation {
 export const OPERATOR_CAPTURE_LIMITS = Object.freeze({
   manifestBytes: 2_000_000,
   fileBytes: 20_000_000,
-  totalBytes: 200_000_000,
+  totalBytes: 512_000_000,
   inventoryUrls: 10_000,
   observations: 1_000,
   assets: 5_000,

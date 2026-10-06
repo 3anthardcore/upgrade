@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, lstat } from "node:fs/promises";
 import { load } from "cheerio";
 import { identifyUrl, verifyCrawlSnapshots } from "../crawler/index.ts";
 import type { CrawlResult, CrawlEntry, CrawlAsset } from "../crawler/index.ts";
+import type { CommerceModel } from "../contracts/commerce.ts";
+import { extractCommerceObservation } from "./commerce.ts";
+import { primaryDom, cleanPrimaryDom } from "./primary-dom.ts";
 
 export interface Evidence {
   source_url: string;
@@ -97,6 +100,7 @@ export interface ContentModel {
   schema_version: 1;
   project_id: string;
   source_origin: string;
+  commerce?: CommerceModel;
   entities: ContentEntity[];
   offers: Offer[];
   prices: PriceObservation[];
@@ -222,10 +226,43 @@ export async function extractContent(
   crawl: CrawlResult,
 ): Promise<ContentModel> {
   await verifyCrawlSnapshots(crawl);
+  const verifiedAssets = new Map<string, { sha256: string; mime: string }>();
+  for (const asset of crawl.assets) {
+    if (
+      asset.status !== "FETCHED" ||
+      !asset.body_path ||
+      !asset.sha256 ||
+      !asset.mime
+    )
+      continue;
+    const info = await lstat(asset.body_path);
+    if (!info.isFile() || info.isSymbolicLink() || info.size > 200_000_000)
+      throw new Error("Source asset is not a bounded regular snapshot");
+    const bytes = await readFile(asset.body_path);
+    if (
+      bytes.length !== info.size ||
+      (asset.size_bytes !== undefined && bytes.length !== asset.size_bytes) ||
+      createHash("sha256").update(bytes).digest("hex") !== asset.sha256
+    )
+      throw new Error(
+        "Source asset SHA-256 or byte count changed during extraction",
+      );
+    const previous = verifiedAssets.get(asset.source_url);
+    if (
+      previous &&
+      (previous.sha256 !== asset.sha256 || previous.mime !== asset.mime)
+    )
+      throw new Error("Source asset has conflicting verified snapshots");
+    verifiedAssets.set(asset.source_url, {
+      sha256: asset.sha256,
+      mime: asset.mime,
+    });
+  }
   const model: ContentModel = {
     schema_version: 1,
     project_id: crawl.project_id,
     source_origin: crawl.source_origin,
+    commerce: { schema_version: 1, entries: [] },
     entities: [],
     offers: [],
     prices: [],
@@ -276,7 +313,13 @@ export async function extractContent(
       !["text/html", "application/xhtml+xml"].includes(entry.mime ?? "")
     )
       continue;
-    const html = await readFile(entry.dom_path ?? entry.body_path, "utf8"),
+    // Validate the exact buffer used by both extractors, not just an earlier
+    // filesystem pass. Source controls remain inert input to the normalizer.
+    const bytes = await readFile(entry.dom_path ?? entry.body_path);
+    const snapshotSha = entry.dom_sha256 ?? entry.body_sha256!;
+    if (createHash("sha256").update(bytes).digest("hex") !== snapshotSha)
+      throw new Error("Source SHA-256 changed during extraction");
+    const html = bytes.toString("utf8"),
       $ = load(html);
     const evidence = (locator: string): Evidence => ({
       source_url: entry.crawl_key,
@@ -312,16 +355,24 @@ export async function extractContent(
           : "Page";
     const primary = product ?? article ?? service ?? {};
     const sourceId = stableId(type, entry.crawl_key);
-    const main = $("main").first().length
-      ? $("main").first()
-      : $("article").first().length
-        ? $("article").first()
-        : $("body");
-    main
-      .find(
-        'script,style,nav,header,footer,form,button,input,textarea,select,iframe,object,embed,svg,template,noscript,[hidden],[aria-hidden="true"]',
-      )
-      .remove();
+    const chosen = primaryDom($),
+      main = chosen.node;
+    model.commerce!.entries.push(
+      extractCommerceObservation(html, {
+        entitySourceId: sourceId,
+        sourceUrl: entry.crawl_key,
+        documentUrl: entry.final_url ?? entry.crawl_key,
+        observedAt: entry.fetched_at ?? crawl.started_at,
+        snapshotSha256: snapshotSha,
+        primarySelector: chosen.selector,
+        primaryIndex: $(chosen.selector).toArray().indexOf(main.get(0)!),
+        verifiedAsset: (url) => {
+          const asset = verifiedAssets.get(url);
+          return asset?.mime.startsWith("image/") ? asset.sha256 : undefined;
+        },
+      }),
+    );
+    cleanPrimaryDom($, main.get(0)!, chosen.selector === "body");
     const blocks: ContentBlock[] = [];
     main
       .find('h1,h2,h3,h4,h5,h6,p,ul,ol,table,blockquote,img,a[href$=".pdf"]')
@@ -362,12 +413,11 @@ export async function extractContent(
               node.attr(tag === "img" ? "src" : "href") ?? "",
               entry.final_url ?? entry.crawl_key,
             ).crawl_key;
-            const asset = crawl.assets.find((item) => item.source_url === url);
+            const asset = verifiedAssets.get(url);
             blocks.push({
               type: tag === "img" ? "image" : "document",
               source_url: url,
-              asset_sha256:
-                asset?.status === "FETCHED" ? asset.sha256 : undefined,
+              asset_sha256: asset?.sha256,
               alt: node.attr("alt") ?? text,
             });
           } catch {

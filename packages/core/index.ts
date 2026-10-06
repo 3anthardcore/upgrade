@@ -257,6 +257,16 @@ export class Store {
       this.event("dispatcher.released", owner, {}, runId);
     });
   }
+  renewDispatcher(runId: string, owner: string, ttl = 60000) {
+    return this.transaction(() => {
+      const r = this.get<Run>("run", runId);
+      if (r.dispatcher_owner !== owner || r.dispatcher_until <= Date.now())
+        throw new UpgradeError("Dispatcher ownership lost", 3);
+      r.dispatcher_until = Date.now() + ttl;
+      this.put("run", runId, r);
+      return r;
+    });
+  }
   createTask(
     input: Partial<Task> & Pick<Task, "role" | "goal" | "stage">,
   ): Task {
@@ -445,7 +455,9 @@ export class Store {
     taskId: string | null = null,
     worker?: string,
     token?: number,
+    publicationGuard?: () => void,
   ): Artifact {
+    publicationGuard?.();
     const r = this.currentRun(),
       bytes = Buffer.from(data);
     if (taskId) this.lease(this.get<Task>("task", taskId), worker!, token!);
@@ -476,6 +488,7 @@ export class Store {
       validation_status: "VALID",
     };
     this.transaction(() => {
+      publicationGuard?.();
       if (taskId) this.lease(this.get<Task>("task", taskId), worker!, token!);
       this.put("artifact", id, a);
       this.event(
@@ -485,6 +498,7 @@ export class Store {
         r.run_id,
         taskId,
       );
+      publicationGuard?.();
     });
     return a;
   }

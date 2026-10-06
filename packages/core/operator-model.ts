@@ -13,6 +13,7 @@ import {
   lstatSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { Ajv } from "ajv";
 import { Store, UpgradeError, hash, inside, uid } from "./index.ts";
 import { Pipeline } from "./pipeline.ts";
@@ -130,6 +131,7 @@ const validateManifest = new Ajv({
 const MAX_ARTIFACT_BYTES = 256_000_000;
 const MODEL_CODE = [
   "packages/core/operator-model.ts",
+  "packages/contracts/commerce.ts",
   "packages/extractor",
   "packages/crawler",
   "package-lock.json",
@@ -252,7 +254,7 @@ function artifactJson<T>(
   }
 }
 
-function loadCapture(store: Store, options: OperatorOptions) {
+async function loadCapture(store: Store, options: OperatorOptions, pipeline: Pipeline) {
   if (
     (options.allObserved !== undefined &&
       typeof options.allObserved !== "boolean") ||
@@ -358,7 +360,11 @@ function loadCapture(store: Store, options: OperatorOptions) {
       return fail("Operator file size disagrees with its manifest");
     return read.bytes;
   };
-  for (const relativePath of declared.keys()) readFile(relativePath);
+  for (const relativePath of declared.keys()) {
+    await nextTurn();
+    pipeline.assertOwnership(true);
+    readFile(relativePath);
+  }
   let sourceHash: string | null = null;
   if (receipt.source_artifact_id) {
     const source = artifactJson<any>(store, receipt.source_artifact_id);
@@ -631,7 +637,7 @@ export async function createOperatorModel(
   return verification(() =>
     pipeline.locked(
       async () => {
-        const input = loadCapture(store, options);
+        const input = await loadCapture(store, options, pipeline);
         const codeHash = sourceFingerprint(MODEL_CODE);
         const inputHash = hash(
           JSON.stringify([modelDomain(input.binding), input.binding, codeHash]),
@@ -658,7 +664,10 @@ export async function createOperatorModel(
         const extracted = await extractOperatorContent(input.capture, {
           projectId: input.project.project_id,
           sourceVersion: input.binding.capture_result_sha256,
-          readFile: input.readFile,
+          readFile: (relativePath) => {
+            pipeline.assertOwnership(true);
+            return input.readFile(relativePath);
+          },
         });
         if (sourceFingerprint(MODEL_CODE) !== codeHash)
           return fail(
@@ -684,6 +693,10 @@ export async function createOperatorModel(
         const model: ModelArtifact = {
           ...extracted,
           entities: selectedEntities,
+          ...(extracted.commerce ? {commerce: {
+            schema_version: 1 as const,
+            entries: extracted.commerce.entries.filter((entry) => selectedEntities.some((entity) => entity.source_id === entry.entity_source_id)),
+          }} : {}),
           raw_selected_fields: extracted.raw_selected_fields.filter((field) =>
             selectedEntities.some(
               (entity) => entity.source_id === field.entity_source_id,
@@ -842,7 +855,11 @@ function addPartialBoundary(
   manifest.files["data/operator-scope.json"] = hash(scopeBytes);
   const headerPath = "code/local/templates/upgrade/header.php";
   const header = readFileSync(join(directory, headerPath), "utf8");
-  const marker = "Концепция обновления · Демонстрация";
+  // Keep the reviewed template's safety notice intact while replacing only its
+  // visible scope label. Older source packages retain their historical marker.
+  const marker = header.includes("Закрытая демонстрация")
+    ? "Закрытая демонстрация"
+    : "Концепция обновления · Демонстрация";
   if (!header.includes(marker))
     return fail(
       "Own template no longer exposes the expected partial-banner insertion point",
@@ -890,14 +907,14 @@ export async function buildOperatorPackage(
           throw new UpgradeError(
             "Build selection must match the model: use --all-observed only for an ALL_OBSERVED model",
           );
-        const input = loadCapture(store, {
+        const input = await loadCapture(store, {
           ...options,
           page:
             options.page ??
             (record.operator_binding.schema_version === 1
               ? record.operator_binding.selected_source_url
               : undefined),
-        });
+        }, pipeline);
         assertModelIntent(record, input.binding, options.modelId);
         const model = artifactJson<ModelArtifact>(
           store,
@@ -1080,6 +1097,7 @@ export async function buildOperatorPackage(
             routes: routes.value.routes.map((route) => ({ ...route })),
             assets,
             assetRoot: mediaRoot,
+            commerce: model.value.commerce,
           });
           addPartialBoundary(
             attempt,
@@ -1139,8 +1157,11 @@ export async function buildOperatorPackage(
           input.project.project_id,
           build.manifest_sha256_package,
         );
-        for (const file of [...Object.keys(manifest.files), "manifest.json"])
+        for (const file of [...Object.keys(manifest.files), "manifest.json"]) {
+          await nextTurn();
+          pipeline.assertOwnership(true);
           chmodSync(inside(finalDir, file), 0o400);
+        }
         const release = operatorRelease(manifest, build, record);
         const bytes = json(release);
         build.result_artifact_id = reuseJson(

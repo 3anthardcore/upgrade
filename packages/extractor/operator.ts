@@ -19,6 +19,12 @@ import type {
 } from "../crawler/operator.ts";
 import type { CrawlAsset } from "../crawler/index.ts";
 import { sanitizeHtml } from "./index.ts";
+import { extractCommerceObservation } from "./commerce.ts";
+import {
+  primaryDom,
+  cleanPrimaryDom,
+  explicitlyHiddenStyle,
+} from "./primary-dom.ts";
 import type {
   ContentBlock,
   ContentEntity,
@@ -113,8 +119,6 @@ function selectedFieldLabel(name: string): string {
   return name;
 }
 
-const inactiveDom =
-  'script,style,button,input,textarea,select,iframe,frame,object,embed,svg,math,template,noscript,[hidden],[aria-hidden="true"]';
 const structuralTags = new Set([
   "div",
   "section",
@@ -146,74 +150,6 @@ const atomicTags = new Set([
   "blockquote",
 ]);
 const isElement = (node: AnyNode): node is Element => "tagName" in node;
-const explicitlyHiddenStyle =
-  /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\s*(?:!important\s*)?(?:;|$)/i;
-
-function cleanPrimaryDom($: CheerioAPI, root: Element, bodyFallback = false) {
-  const main = $(root);
-  main.find(inactiveDom).remove();
-  main.find("nav,aside").remove();
-  if (bodyFallback) main.find("header,footer").remove();
-  main.find("[style]").each((_i, node) => {
-    if (explicitlyHiddenStyle.test($(node).attr("style") ?? ""))
-      $(node).remove();
-  });
-  // Product/review copy may live inside a form. Preserve inert text, not fields or actions.
-  main.find("form").each((_i, node) => {
-    $(node).replaceWith($(node).contents());
-  });
-  return main;
-}
-
-/** The selector is an auditable heuristic, not proof that a page is complete. */
-function primaryDom($: CheerioAPI) {
-  const usable = (node: Element) => {
-    if (
-      $(node).is('[hidden],[aria-hidden="true"]') ||
-      $(node).parents('[hidden],[aria-hidden="true"],nav,header,footer,aside')
-        .length ||
-      $(node)
-        .parents("[style]")
-        .add(node)
-        .toArray()
-        .some((parent) =>
-          explicitlyHiddenStyle.test($(parent).attr("style") ?? ""),
-        )
-    )
-      return false;
-    // Inspect the same inert content that extraction will retain, without
-    // changing original nodes used for source locators and metadata evidence.
-    const retained = cleanPrimaryDom($, $(node).clone().get(0)!);
-    return Boolean(retained.text().trim() || retained.find("img").length);
-  };
-  for (const selector of [
-    "main",
-    '[role="main"]',
-    "#content",
-    "#main",
-    "#main-content",
-  ]) {
-    const candidates = $(selector)
-      .toArray()
-      .filter((node): node is Element => isElement(node) && usable(node));
-    if (candidates.length === 1) return { node: $(candidates[0]), selector };
-  }
-  const articles = $("article")
-    .toArray()
-    .filter((node): node is Element => isElement(node) && usable(node));
-  const pageHeading = $("body h1").first().get(0);
-  if (
-    articles.length === 1 &&
-    (!pageHeading ||
-      $(articles[0])
-        .find("h1")
-        .toArray()
-        .includes(pageHeading as Element))
-  )
-    return { node: $(articles[0]), selector: "article" };
-  return { node: $("body"), selector: "body" };
-}
-
 function originalLocators(root: Element): WeakMap<AnyNode, string> {
   const locators = new WeakMap<AnyNode, string>();
   const stack: Array<{ node: AnyNode; locator: string; depth: number }> = [
@@ -516,6 +452,7 @@ export async function extractOperatorContent(
     schema_version: 1,
     project_id: capture.project_id,
     source_origin: sourceOrigin,
+    commerce: { schema_version: 1, entries: [] },
     entities: [],
     offers: [],
     prices: [],
@@ -1027,6 +964,23 @@ export async function extractOperatorContent(
           "HTML has no primary content root",
         );
       const sourceLocators = originalLocators(mainElement);
+      // Preserve controls and source price roles before generic inert cleanup.
+      model.commerce!.entries.push(
+        extractCommerceObservation(html, {
+          entitySourceId: entity.source_id,
+          sourceUrl: identity.crawl_key,
+          documentUrl: document.crawl_key,
+          observedAt: observation.observed_at,
+          snapshotSha256: observation.file.sha256,
+          primarySelector: chosen.selector,
+          primaryIndex: $(chosen.selector).toArray().indexOf(mainElement),
+          verifiedAsset: (url) =>
+            assets.get(url)?.operator_bytes === "VERIFIED" &&
+            assets.get(url)?.mime?.startsWith("image/")
+              ? assets.get(url)?.sha256
+              : undefined,
+        }),
+      );
       const locator = (node: AnyNode) =>
         `${chosen.selector}: ${sourceLocators.get(node) ?? "source descendant"}`;
       entity.facts["dom:primary_content"] = fact(

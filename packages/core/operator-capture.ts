@@ -9,6 +9,7 @@ import {
   readFileSync,
 } from "node:fs";
 import { resolve } from "node:path";
+import { setImmediate as nextTurn } from "node:timers/promises";
 import { Store, UpgradeError, hash, inside } from "./index.ts";
 import { Pipeline } from "./pipeline.ts";
 import type { Artifact, Project } from "../contracts/index.ts";
@@ -155,8 +156,11 @@ export async function ingestOperatorCapture(
           5,
         );
       if (receipt?.state === "COMMITTED") {
-        for (const file of receipt.files)
+        for (const file of receipt.files) {
+          await nextTurn();
+          pipeline.assertOwnership(true);
           store.validateArtifact(file.artifact_id);
+        }
         store.validateArtifact(receipt.result_artifact_id!);
         return {
           ...receipt,
@@ -186,12 +190,18 @@ export async function ingestOperatorCapture(
         });
       }
       // Reconcile deterministic artifact identities before retrying an unknown publication.
+      // The dispatcher excludes another ingestion publisher. Build one index instead
+      // of parsing the entire artifact registry again for every source file.
+      const artifactIndex = new Map<string, Artifact[]>();
+      for (const artifact of store.list<Artifact>("artifact")) {
+        const matches = artifactIndex.get(artifact.type) ?? [];
+        matches.push(artifact);
+        artifactIndex.set(artifact.type, matches);
+      }
       const publish = (relativePath: string, bytes: Buffer) => {
         pipeline.assertOwnership(true);
         const type = `operator-capture-${hash(JSON.stringify([id, validated.manifest_sha256, relativePath]))}.bin`;
-        const matches = store
-          .list<Artifact>("artifact")
-          .filter((a) => a.type === type);
+        const matches = artifactIndex.get(type) ?? [];
         if (matches.length > 1)
           throw new UpgradeError("Ambiguous capture artifact identity", 5);
         if (matches[0]) {
@@ -200,7 +210,9 @@ export async function ingestOperatorCapture(
             throw new UpgradeError("Conflicting stored capture bytes", 5);
           return found;
         }
-        return store.publishArtifact(type, bytes);
+        const artifact = store.publishArtifact(type, bytes);
+        artifactIndex.set(type, [artifact]);
+        return artifact;
       };
       const refs = [
         {
@@ -212,6 +224,10 @@ export async function ingestOperatorCapture(
       ];
       const accepted: CaptureReceipt["files"] = [];
       for (const ref of refs) {
+        // Native fs and SQLite calls below are synchronous. Let the lease timer
+        // and other processes run between bounded files; never revive an expired lease.
+        await nextTurn();
+        pipeline.assertOwnership(true);
         const bytes = pinnedBytes(
           directory,
           ref.relative_path,
@@ -248,6 +264,7 @@ export async function ingestOperatorCapture(
         result_artifact_id: resultArtifact.artifact_id,
       };
       store.transaction(() => {
+        pipeline.assertOwnership(true);
         store.put("operator_capture", id, committed);
         store.event(
           "operator_capture.committed",

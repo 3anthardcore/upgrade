@@ -2,6 +2,8 @@
 if (!defined('B_PROLOG_INCLUDED') || B_PROLOG_INCLUDED!==true) { die(); }
 $content=$arResult['CONTENT'];
 $escape=static fn($value): string=>htmlspecialchars((string)$value,ENT_QUOTES|ENT_SUBSTITUTE,'UTF-8');
+$demo=$arResult['DEMO_VIEW']??null;
+if($demo && ($demo['kind']??'')!=='product'){echo \Upgrade\Core\DemoView::render($demo);return;}
 ?>
 <?php if (!$content): ?>
   <article class="document empty-state"><p class="eyebrow"><?= (int)$arResult['STATUS'] ?></p><h1><?= (int)$arResult['STATUS']===410?'Страница удалена':'Страница не найдена' ?></h1><p>Проверьте адрес или перейдите к доступным материалам.</p><a class="button" href="/">На главную</a></article>
@@ -9,6 +11,7 @@ $escape=static fn($value): string=>htmlspecialchars((string)$value,ENT_QUOTES|EN
   <article class="document" data-upgrade-entity="<?= $escape($arResult['ROUTE']['ENTITY_KEY']) ?>">
     <p class="eyebrow">Снимок публичного источника</p>
     <h1><?= $escape($content['UPGRADE_PROPERTIES']['UG_H1']?:$content['NAME']) ?></h1>
+    <?php if($demo): ?><?= \Upgrade\Core\DemoView::render($demo) ?><?php endif ?>
     <?php if ($content['PREVIEW_TEXT']): ?><p class="lead"><?= $escape($content['PREVIEW_TEXT']) ?></p><?php endif ?>
     <div class="prose"><?php
     // Imported HTML is composed by our gateway exclusively from escaped model blocks.

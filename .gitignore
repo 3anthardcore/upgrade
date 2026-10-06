@@ -1,6 +1,13 @@
 node_modules/
 var/
 .env
+.env.*
+!.env.example
+*.private
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+stage1-design/data/
 *.db
 *.db-wal
 *.db-shm

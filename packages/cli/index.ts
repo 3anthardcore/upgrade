@@ -14,6 +14,16 @@ import { doctor } from "../core/doctor.ts";
 import { loadProfile } from "../core/config.ts";
 import { backupProject, restoreProject } from "../core/backup.ts";
 import { ingestOperatorCapture } from "../core/operator-capture.ts";
+import {
+  nativeConfiguration,
+  nativeGuard,
+  configureNative,
+  prepareNativeHandoff,
+  ingestNativeHandoff,
+  nativeRunStatus,
+} from "../core/native-run.ts";
+import { parseHandoff } from "../contracts/native-handoff.ts";
+import type { HandoffAction } from "../contracts/native-handoff.ts";
 import type { Task, AgentResult, Check } from "../contracts/index.ts";
 export const EXIT = {
   OK: 0,
@@ -78,8 +88,15 @@ export async function main(argv = process.argv.slice(2)) {
         "operator model --project ID --capture ID --manifest-sha256 SHA256 [--page URL | --all-observed]",
         "operator build --project ID --capture ID --manifest-sha256 SHA256 --model MODEL_ID [--all-observed]",
         "crawl|extract|build|verify|report|package --project ID",
+        "target-evidence ingest --project ID --build BUILD_ID --directory DIR --manifest-sha256 SHA256",
+        "native-qa ingest --project ID --build BUILD_ID --directory DIR --manifest-sha256 SHA256",
+        "native configure --project ID --binding PUBLIC_JSON --kind operator|pipeline --build BUILD_ID",
+        "native prepare --project ID --action validate|dry-run|apply|reconcile",
+        "native ingest --project ID --request-id SHA --receipt FILE --receipt-sha256 SHA",
+        "native status --project ID",
         "crawl|run --project ID --ack-access-block BLOCK_ID --access-resolution-reason TEXT",
         "import --project ID --dry-run",
+        "target validate|dry-run|reconcile|apply --target-profile FILE --profile-sha256 SHA --package DIRECTORY --manifest-sha256 SHA --journal-dir PRIVATE_DIRECTORY --environment demo",
         "pause|resume|retry|cancel --project ID",
         "backup --project ID --to PATH",
         "restore --from PATH --to PATH",
@@ -92,13 +109,46 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (command === "doctor") {
     loadProfile(text("profile") ?? "public");
-    const result = await doctor(data);
+    let binding;
+    if (text("project")) {
+      const root = projectRoot(data, text("project")!);
+      if (!existsSync(resolve(root, "state/upgrade.db")))
+        throw new UpgradeError("Project missing");
+      const store = new Store(root);
+      try {
+        binding = nativeConfiguration(store)?.binding;
+      } finally {
+        store.close();
+      }
+    }
+    const result = await doctor(data, binding);
     print(result);
     return result.checks.node.ok ? 0 : 2;
   }
   if (command === "restore") {
     print(await restoreProject(text("from", true)!, text("to", true)!));
     return 0;
+  }
+  // Privileged transport keeps its own journal; never open the content Store as root.
+  if (command === "target") {
+    if (
+      text("environment") !== "demo" ||
+      !["validate", "dry-run", "reconcile", "apply"].includes(sub ?? "")
+    )
+      throw new UpgradeError(
+        "Target requires an explicit demo environment and supported action",
+      );
+    const { executeNativeTarget } = await import("../bitrix-adapter/native.ts");
+    const result = await executeNativeTarget({
+      profilePath: text("target-profile", true)!,
+      profileSha256: text("profile-sha256", true)!,
+      packageDir: text("package", true)!,
+      manifestSha256: text("manifest-sha256", true)!,
+      journalDir: text("journal-dir", true)!,
+      action: sub as "validate" | "dry-run" | "reconcile" | "apply",
+    });
+    print(result);
+    return result.status === "RECONCILED_INCOMPLETE" ? EXIT.VERIFY : EXIT.OK;
   }
   const accessBlock = text("ack-access-block");
   const accessReason = text("access-resolution-reason");
@@ -303,6 +353,80 @@ export async function main(argv = process.argv.slice(2)) {
         else throw new UpgradeError("Use operator model or operator build");
         break;
       }
+      case "target-evidence": {
+        if (sub !== "ingest")
+          throw new UpgradeError("Use target-evidence ingest");
+        const { ingestTargetEvidence } =
+          await import("../core/target-evidence.ts");
+        value = await ingestTargetEvidence(store, {
+          buildId: text("build", true)!,
+          directory: text("directory", true)!,
+          expectedManifestSha256: text("manifest-sha256", true)!,
+        });
+        pipeline.report();
+        break;
+      }
+      case "native-qa": {
+        if (sub !== "ingest") throw new UpgradeError("Use native-qa ingest");
+        const { ingestNativeQaEvidence } =
+          await import("../core/native-qa-evidence.ts");
+        value = await ingestNativeQaEvidence(store, {
+          buildId: text("build", true)!,
+          directory: text("directory", true)!,
+          expectedManifestSha256: text("manifest-sha256", true)!,
+        });
+        pipeline.report();
+        break;
+      }
+      case "native": {
+        value = await pipeline.locked(
+          async () => {
+            const guard = () =>
+              nativeGuard(store, () => pipeline.assertOwnership(true));
+            if (sub === "configure") {
+              const kind = text("kind", true)!;
+              if (!["operator", "pipeline"].includes(kind))
+                throw new UpgradeError(
+                  "Native kind must be operator or pipeline",
+                );
+              return configureNative(
+                store,
+                {
+                  schema_version: 1,
+                  binding: parseHandoff(readFileSync(text("binding", true)!)),
+                  selection: {
+                    kind: kind as "operator" | "pipeline",
+                    id: text("build", true)!,
+                  },
+                },
+                guard,
+              );
+            }
+            if (sub === "prepare")
+              return prepareNativeHandoff(
+                store,
+                text("action", true)! as HandoffAction,
+                guard,
+              );
+            if (sub === "ingest")
+              return ingestNativeHandoff(
+                store,
+                {
+                  requestId: text("request-id", true)!,
+                  receiptPath: text("receipt", true)!,
+                  receiptSha256: text("receipt-sha256", true)!,
+                },
+                guard,
+              );
+            if (sub === "status") return nativeRunStatus(store, guard);
+            throw new UpgradeError(
+              "Use native configure, prepare, ingest or status",
+            );
+          },
+          { maintenance: true },
+        );
+        break;
+      }
       case "run":
         if (text("until") && text("until") !== "demo-ready")
           throw new UpgradeError("Only --until demo-ready is supported");
@@ -327,13 +451,16 @@ export async function main(argv = process.argv.slice(2)) {
           throw new UpgradeError(
             "Import apply requires explicit demo environment",
           );
-        value = await pipeline.locked(() =>
-          pipeline.import(Boolean(f["dry-run"])),
+        value = await pipeline.locked(
+          () => pipeline.import(Boolean(f["dry-run"])),
+          { maintenance: Boolean(nativeConfiguration(store)) },
         );
-        if (f.apply) exit = 4;
+        if (f.apply) exit = nativeConfiguration(store) ? 3 : 4;
         break;
       case "verify":
-        value = await pipeline.locked(() => pipeline.verify());
+        value = await pipeline.locked(() => pipeline.verify(), {
+          maintenance: Boolean(nativeConfiguration(store)),
+        });
         pipeline.report();
         exit = 3;
         break;
@@ -404,12 +531,18 @@ if (isMainModule()) {
   main()
     .then((code) => (process.exitCode = code))
     .catch((error) => {
+      const code =
+        error instanceof UpgradeError
+          ? error.code
+          : error instanceof Error && error.message.startsWith("HANDOFF_")
+            ? EXIT.VERIFY
+            : EXIT.INTERNAL;
       process.stderr.write(
         JSON.stringify({
           error: error instanceof Error ? error.message : String(error),
-          code: error instanceof UpgradeError ? error.code : 70,
+          code,
         }) + "\n",
       );
-      process.exitCode = error instanceof UpgradeError ? error.code : 70;
+      process.exitCode = code;
     });
 }

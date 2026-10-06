@@ -1,0 +1,12 @@
+{
+  "status": "PASS",
+  "total": 81,
+  "filtered": 17,
+  "cart": true,
+  "remove": true,
+  "searchEmpty": true,
+  "mobileWidth": 390,
+  "overflow": false,
+  "broken": 0,
+  "errors": []
+}

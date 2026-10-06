@@ -3,7 +3,15 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, writeFile, rm, rename } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  writeFile,
+  rm,
+  rename,
+  cp,
+  mkdir,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -393,11 +401,17 @@ test("legacy COMPLETE challenge snapshots are rejected offline and converted to 
       code: "STORED_ACCESS_CHALLENGE",
     });
     const count = f.requests.length;
-    await writeFile(
-      path.join(f.options.outputDir, "crawl.json"),
-      JSON.stringify(result),
+    // A real legacy snapshot has no WAL. Do not overwrite a modern projection
+    // while retaining its authoritative journal and call that a legacy import.
+    const legacyDir = path.join(f.options.outputDir, "legacy-fixture");
+    await mkdir(legacyDir);
+    await cp(
+      path.join(f.options.outputDir, "snapshots"),
+      path.join(legacyDir, "snapshots"),
+      { recursive: true },
     );
-    const guarded = await crawlSite(f.options);
+    await writeFile(path.join(legacyDir, "crawl.json"), JSON.stringify(result));
+    const guarded = await crawlSite({ ...f.options, outputDir: legacyDir });
     assert.equal(guarded.state, "PAUSED");
     assert.equal(guarded.access!.blocks[0].stage, "stored_snapshot");
     assert.equal(guarded.entries[0].status, "REQUIRES_ACCESS");
